@@ -5,8 +5,11 @@ This repository had been updated by KC9KKO and N3DS with code for 		FT8(Internal
 
 FT8( Internal )	based on KN6ZDE’s experimental implementation.
 			in addition screens for FT8 display as added.
+
 WSJT-X USB connection also based on KN6ZDE’s experimental code.
-			Updates to Phoenix’s CAT via USB integrated WSJT-X.
+Updates to Phoenix’s CAT via USB integrated WSJT-X.
+
+
 Keyboard and Mouse was updated to allow for wireless connections.
 	
 This is a new software approach, called Phoenix, for the T41-EP radio running V12 hardware. It is a ground-up rewrite of the T41 software, which had been authored by dozens of people over the years. I have listed the known authors that left their call signs in the code in the file `code/Contributors.txt` -- please let me know if I've missed anyone!
