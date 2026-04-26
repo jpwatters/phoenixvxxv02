@@ -1,4 +1,5 @@
 #include "SDT.h"
+#include "DSP_FT8.h"  // for FT8IsTxInProgress() / FT8GetNextTxAudioChunk()
 
 float32_t DMAMEM float_buffer_L[READ_BUFFER_SIZE];
 float32_t DMAMEM float_buffer_R[READ_BUFFER_SIZE];
@@ -602,9 +603,57 @@ float32_t GetSAMCarrierOffset(void){
     return SAM_carrier_freq_offset;
 }
 
+// Scaling constant for the quadrature FM demodulator (qa_fmemod testcase scaling).
+// Ported from T41_SDR/Demod.h.
+static const float32_t fmdemod_quadri_K = 0.340447550238101026565118445432744920253753662109375f;
+
+/**
+ * Narrow-band FM demodulation.
+ *
+ * Quadrature FM demod that computes the time derivative of the phase angle
+ * directly from the I/Q stream without an arctangent (Lyons, "Understanding
+ * Digital Signal Processing", §13.22 Frequency Demodulation Algorithms;
+ * see also https://www.embedded.com/dsp-tricks-frequency-demodulation-algorithms/).
+ *
+ * Ported from T41_SDR/Demod.cpp::nfmdemod, adapted from interleaved I/Q to
+ * Phoenix's separate I[]/Q[] arrays. Mono audio is written back to data->I[].
+ * De-emphasis filtering is intentionally not included in this port.
+ *
+ * @param data Pointer to the DataBlock to act upon
+ */
+void nfmdemod(DataBlock *data){
+    static float32_t last_sample_i = 0.0f;
+    static float32_t last_sample_q = 0.0f;
+
+    if (data->N == 0) return;
+
+    // We overwrite data->I[i] in place with audio, so we cannot read the
+    // original I[i-1] back on the next iteration. Shadow the previous I in a
+    // local. Q is never written, so we read it directly from data->Q[].
+    float32_t prev_i = last_sample_i;
+    float32_t prev_q = last_sample_q;
+
+    for (unsigned i = 0; i < data->N; i++) {
+        float32_t inow = data->I[i];
+        float32_t qnow = data->Q[i];
+        float32_t denom = inow * inow + qnow * qnow;
+        // d(phase)/dt ~= (q[n]*i[n-1] - i[n]*q[n-1]) / (i[n]^2 + q[n]^2)
+        // Lyons §13.22; equivalent to T41's nfmdemod (interleaved layout).
+        data->I[i] = (denom != 0.0f)
+            ? fmdemod_quadri_K * (qnow * prev_i - inow * prev_q) / denom
+            : 0.0f;
+        prev_i = inow;
+        prev_q = qnow;
+    }
+
+    // Save the last raw I/Q for continuity with the next block.
+    last_sample_i = prev_i;
+    last_sample_q = prev_q;
+}
+
 /**
  * Demodulate the audio.
- * 
+ *
  * @param data Pointer to the DataBlock to act upon
  */
 static float32_t wold = 0;
@@ -642,6 +691,17 @@ void Demodulate(DataBlock *data, ReceiveFilterConfig *RXfilters){
         break;
       case SAM:
         AMDecodeSAM(data);
+        break;
+      case NFM:
+        // Narrow-band FM (ported from T41_SDR). Audio lands in data->I[];
+        // data->Q[] is left untouched (matches SAM convention).
+        nfmdemod(data);
+        break;
+      case FT8_INTERNAL:
+        // FT8 internal decode (ported from T41_SDR + ft8_lib). The dispatcher
+        // forwards samples to the FT8 buffering pipeline; the actual decoder
+        // runs at 15-second slot boundaries from RunFT8DecoderLoop().
+        ft8InternalDemod(data);
         break;
       default:
         break;
@@ -1094,15 +1154,46 @@ DataBlock * TransmitProcessing(const char *fname){
     data.I = float_buffer_L;
     data.Q = float_buffer_R;
 
-    // Read data from microphone input buffer
+    // FT8 TX detection: when modulation == FT8_INTERNAL and an FT8 message
+    // is being transmitted, substitute FT8 audio for mic audio after the
+    // decimation chain (the SSB pipeline downstream still does Hilbert
+    // transform + USB sideband selection + interpolation, which is what
+    // FT8 expects).
+    bool ft8tx = (ED.modulation[ED.activeVFO] == FT8_INTERNAL) && FT8IsTxInProgress();
+
+    // Read data from microphone input buffer.
     if (ReadMicrophoneBuffer(&data)){
-        // There is no data available, skip the rest
-        return NULL;
+        // No mic data available. For SSB this means there's nothing to do;
+        // for FT8 TX we still want the pipeline to run, so fill with silence
+        // at the input rate (192 kHz, 2048 samples) so decimation behaves.
+        if (!ft8tx) return NULL;
+        arm_fill_f32(0.0f, data.I, 2048);
+        arm_fill_f32(0.0f, data.Q, 2048);
     }
     //Flag(2);
     TXDecimateBy4(&data,&TXfilters);// 2048 in, 512 out
     TXDecimateBy2(&data,&TXfilters);// 512 in, 256 out
-    BandEQ(&data, &RXfilters, TX);
+
+    // FT8 audio substitution after decimation. We're at 24 kHz / 256 samples
+    // here, which matches FT8GetNextTxAudioChunk's expected output rate
+    // (12 kHz internal -> 2x nearest-neighbor upsample -> 24 kHz).
+    if (ft8tx) {
+        int got = FT8GetNextTxAudioChunk(data.I, 256);
+        if (got < 256) {
+            // End-of-message reached partway through the chunk; pad with
+            // silence so the rest of the SSB pipeline keys cleanly off.
+            for (int i = (got > 0 ? got : 0); i < 256; i++) data.I[i] = 0.0f;
+        }
+    }
+
+    /* Per-band audio EQ is intended for SSB voice shaping. FT8 wants a flat
+     * audio response in the 200-3000 Hz region so the GFSK tones aren't
+     * skewed in amplitude across the audio passband; bypass when
+     * substituting FT8 audio. TXGain still runs so the operator's power
+     * setting applies the same way it does for SSB. */
+    if (!ft8tx) {
+        BandEQ(&data, &RXfilters, TX);
+    }
     TXGain(&data); // apply the DSP gain factor
     arm_copy_f32(data.I,data.Q,256);
     TXDecimateBy2Again(&data,&TXfilters); // 256 in, 128 out

@@ -1,4 +1,5 @@
 /**
+#include "CompilerOptionsCheck.h"
  * @file PhoenixSketch.ino
  * @brief Main entry point for Phoenix SDR transceiver firmware
  *

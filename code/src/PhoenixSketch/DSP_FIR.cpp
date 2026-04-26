@@ -1327,12 +1327,29 @@ void InitFilterMask(float32_t *FIR_filter_mask, ReceiveFilterConfig *RXfilters) 
             case SAM:
             case AM:
             case IQ:
-            case DCF77:
+            case DCF77: {
+                /* Block-scope the local so subsequent case labels can't
+                 * "jump over the initialization" -- C++ requires this when a
+                 * local with a non-trivial initializer is in case scope and
+                 * later cases would otherwise skip past it. */
                 #define MAXABS(a, b) ((abs(a)) > (abs(b)) ? (abs(a)) : (abs(b)))
                 int32_t edge_Hz = MAXABS(bands[ED.currentBand[ED.activeVFO]].FHiCut_Hz,
-                                         bands[ED.currentBand[ED.activeVFO]].FLoCut_Hz); 
+                                         bands[ED.currentBand[ED.activeVFO]].FLoCut_Hz);
                 low_Hz = -edge_Hz;
                 high_Hz = edge_Hz;
+                break;
+            }
+            case NFM:
+                // Narrow-band FM voice: ~3 kHz audio passband, symmetric.
+                low_Hz  = -3000;
+                high_Hz =  3000;
+                break;
+            case FT8_INTERNAL:
+                // FT8 audio (200-3000 Hz typical FT8 audio offsets).
+                // ft8_lib's monitor does its own STFT-based fine selection so
+                // a wide audio passband is preferred to a narrow one.
+                low_Hz  =   200;
+                high_Hz =  3000;
                 break;
         }
     }

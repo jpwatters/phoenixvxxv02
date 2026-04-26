@@ -33,6 +33,13 @@
 //#define USE_ANALOG_SWR
 
 
+// USB host input (mouse + keyboard) -- ported from T41_SDR (plumbing only).
+// Uncomment to enable. When enabled the build requires the PJRC USBHost_t36
+// library (https://github.com/PaulStoffregen/USBHost_t36) to be installed.
+// When disabled (default) FrontPanel_USBHost.* / FrontPanel_USBKeyboard.* /
+// FrontPanel_USBMouse.* compile to no-ops and pull no extra dependencies.
+//#define USB_HOST_INPUT_ENABLED
+
 // CW configuration
 #define CW_TRANSMIT_SPACE_TIMEOUT_MS            200 // how long to wait for another key press before exiting CW transmit state
 #define DEFAULT_KEYER_WPM                       20 // Startup value for keyer wpm

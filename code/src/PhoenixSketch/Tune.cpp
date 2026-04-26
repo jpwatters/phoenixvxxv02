@@ -68,12 +68,21 @@ void AdjustFineTune(int32_t filter_change){
         case SAM:
         case IQ:
         case DCF77:
+        case NFM:
+        case FT8_INTERNAL: {
+            /* Block-scoped local: required so subsequent case labels (if any
+             * are added later) don't "jump over the initialization" of edge_Hz.
+             * NFM and FT8_INTERNAL share the symmetric-edge pattern; FT8 in
+             * particular doesn't use fine-tune via this path (the encoder is
+             * repurposed to ChangeFT8RxFreq), but other callers may still hit
+             * this and need sensible limits. */
             #define MAXABS(a, b) ((abs(a)) > (abs(b)) ? (abs(a)) : (abs(b)))
             int32_t edge_Hz = MAXABS(bands[ED.currentBand[ED.activeVFO]].FHiCut_Hz,
-                                    bands[ED.currentBand[ED.activeVFO]].FLoCut_Hz); 
+                                    bands[ED.currentBand[ED.activeVFO]].FLoCut_Hz);
             lower_limit += edge_Hz;
             upper_limit -= edge_Hz;
             break;
+        }
     }
     //Debug("Upper limit: " + String(upper_limit));
     //Debug("Lower limit: " + String(lower_limit));

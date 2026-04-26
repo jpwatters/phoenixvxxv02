@@ -210,6 +210,8 @@ enum ModulationType {
     AM = 2,
     SAM = 3,
     IQ = 4,
+    NFM = 5,    // Narrow-band FM (ported from T41_SDR Demod.cpp)
+    FT8_INTERNAL = 6,  // FT8 internal decode (ported from T41_SDR ft8.cpp + ft8_lib)
     DCF77 = 29  // set the clock with the time signal station DCF77
 };
 
@@ -311,6 +313,9 @@ extern struct config_t {
     float32_t SWR_R_SlopeAdj[NUMBER_OF_BANDS] = {0,0,0,0,0,0,0,0,0,0,0,0,0}; /** SWR calibration */
     float32_t SWR_R_Offset[NUMBER_OF_BANDS] = {0,0,0,0,0,0,0,0,0,0,0,0.0}; /** SWR calibration */
     float32_t SWR_F_Offset[NUMBER_OF_BANDS] = {0,0,0,0,0,0,0,0,0,0,0,0.0}; /** SWR calibration */
+
+    char callsign[14] = MY_CALL;  /** Operator callsign for FT8 + future digital modes; default from Config.h MY_CALL */
+    char grid[7]      = "AA00";   /** Maidenhead grid square (4 or 6 chars + nul); placeholder default */
 } ED;
 
 // Define a structure to hold the results of built-in-test routine

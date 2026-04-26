@@ -1,0 +1,885 @@
+#include "SDT.h"
+#include <LittleFS.h> // comes bundled with Teensyduino
+#include <SD.h>
+#include <ArduinoJson.h>
+
+const char *filename = "T41_configuration.txt";
+LittleFS_Program myfs;
+static bool SDpresent = false;
+
+/**
+ * Initialize the storage subsystem.
+ * Initializes both the LittleFS program flash storage (1MB) and optional SD card storage.
+ * Automatically attempts to restore the configuration from storage after initialization.
+ */
+void InitializeStorage(void){
+    if (!myfs.begin(1024 * 1024)) { // minimum size is 64 KB
+        Serial.printf("Error starting %s\n", "Program flash DISK");
+    }
+    if (SD.begin(BUILTIN_SDCARD)) {
+        Serial.println("SD card initialized.");
+        SDpresent = true;
+    } else {
+        Serial.println("SD card not initialized!");
+        SDpresent = false;
+    }
+    RestoreDataFromStorage();
+}
+
+/**
+ * Save config_t struct to flash memory as a file using the LittleFS.h
+ * file system. This also saves the file to the SD card, if it is present,
+ * if the parameter is set to true
+ * 
+ * @param savetosd Save the file to the SD card as well
+ */
+void SaveDataToStorage(bool savetosd){
+    JsonDocument doc;  // This uses the heap.
+
+    // Assign the elements of ED to doc
+    doc["agc"] = ED.agc;
+    doc["audioVolume"] = ED.audioVolume;
+    doc["rfGainAllBands_dB"] = ED.rfGainAllBands_dB;
+    doc["stepFineTune"] = ED.stepFineTune;
+    doc["nrOptionSelect"] = ED.nrOptionSelect;
+    doc["ANR_notchOn"] = ED.ANR_notchOn;
+    doc["spectrumFloorAuto"] = ED.spectrumFloorAuto;
+    doc["spectrumScale"] = ED.spectrumScale;
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        doc["spectrumNoiseFloor"][i] = ED.spectrumNoiseFloor[i];
+    }
+    doc["spectrum_zoom"] = ED.spectrum_zoom;
+    doc["CWFilterIndex"] = ED.CWFilterIndex;
+    doc["CWToneIndex"] = ED.CWToneIndex;
+    doc["decoderFlag"] = ED.decoderFlag;
+    doc["keyType"] = ED.keyType;
+    doc["currentWPM"] = ED.currentWPM;
+    doc["sidetoneVolume"] = ED.sidetoneVolume;
+    doc["freqIncrement"] = ED.freqIncrement;
+    doc["freqCorrectionFactor"] = ED.freqCorrectionFactor;
+    doc["activeVFO"] = ED.activeVFO;
+
+    // Arrays
+    doc["modulation"][0] = ED.modulation[0];
+    doc["modulation"][1] = ED.modulation[1];
+    doc["currentBand"][0] = ED.currentBand[0];
+    doc["currentBand"][1] = ED.currentBand[1];
+    doc["centerFreq_Hz"][0] = ED.centerFreq_Hz[0];
+    doc["centerFreq_Hz"][1] = ED.centerFreq_Hz[1];
+    doc["fineTuneFreq_Hz"][0] = ED.fineTuneFreq_Hz[0];
+    doc["fineTuneFreq_Hz"][1] = ED.fineTuneFreq_Hz[1];
+
+    // Equalizer arrays
+    for(int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+        doc["equalizerRec"][i] = ED.equalizerRec[i];
+        doc["equalizerXmt"][i] = ED.equalizerXmt[i];
+    }
+
+    doc["currentMicGain"] = ED.currentMicGain;
+
+    // Band-specific arrays
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        doc["dbm_calibration"][i] = ED.dbm_calibration[i];
+        doc["powerOutCW"][i] = ED.powerOutCW[i];
+        doc["powerOutSSB"][i] = ED.powerOutSSB[i];
+        doc["IQAmpCorrectionFactor"][i] = ED.IQAmpCorrectionFactor[i];
+        doc["IQPhaseCorrectionFactor"][i] = ED.IQPhaseCorrectionFactor[i];
+        doc["IQXAmpCorrectionFactor"][i] = ED.IQXAmpCorrectionFactor[i];
+        doc["IQXPhaseCorrectionFactor"][i] = ED.IQXPhaseCorrectionFactor[i];
+        doc["DCOffsetI"][i] = ED.DCOffsetI[i];
+        doc["DCOffsetQ"][i] = ED.DCOffsetQ[i];
+        doc["XAttenCW"][i] = ED.XAttenCW[i];
+        doc["RAtten"][i] = ED.RAtten[i];
+        doc["antennaSelection"][i] = ED.antennaSelection[i];
+        doc["SWR_F_SlopeAdj"][i] = ED.SWR_F_SlopeAdj[i];
+        doc["SWR_R_SlopeAdj"][i] = ED.SWR_R_SlopeAdj[i];
+        doc["SWR_R_Offset"][i] = ED.SWR_R_Offset[i];
+        doc["SWR_F_Offset"][i] = ED.SWR_F_Offset[i];
+
+        // Last frequencies array (3 values per band)
+        for(int j = 0; j < 3; j++) {
+            doc["lastFrequencies"][i][j] = ED.lastFrequencies[i][j];
+        }
+    }
+
+    doc["keyerFlip"] = ED.keyerFlip;
+    doc["PA100Wactive"] = ED.PA100Wactive;
+
+    // Power calibration arrays
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        doc["PowerCal_20W_Psat_mW"][i] = ED.PowerCal_20W_Psat_mW[i];
+        doc["PowerCal_20W_kindex"][i] = ED.PowerCal_20W_kindex[i];
+        doc["PowerCal_100W_Psat_mW"][i] = ED.PowerCal_100W_Psat_mW[i];
+        doc["PowerCal_100W_kindex"][i] = ED.PowerCal_100W_kindex[i];
+        doc["PowerCal_20W_DSP_Gain_correction_dB"][i] = ED.PowerCal_20W_DSP_Gain_correction_dB[i];
+        doc["PowerCal_100W_DSP_Gain_correction_dB"][i] = ED.PowerCal_100W_DSP_Gain_correction_dB[i];
+    }
+
+    doc["PowerCal_20W_to_100W_threshold_W"] = ED.PowerCal_20W_to_100W_threshold_W;
+
+    // Write this JSON object to filename on the LittleFS
+    // Delete existing file, otherwise data is appended to the file
+    myfs.remove(filename);
+    File file = myfs.open(filename, FILE_WRITE);
+    if (file) {
+        if (serializeJson(doc, file) == 0){
+            Serial.println(F("Failed to write to LittleFS"));
+        }else{
+            Serial.println("Config saved to LittleFS");
+        }
+        file.flush();
+        file.close();
+    } else {
+        Serial.println("Failed to open LittleFS file for writing");
+    }
+
+    // Save it to the SD card as well if it is present
+    if (SDpresent && savetosd) {
+        // Delete existing file, otherwise data is appended to the file
+        SD.remove(filename);
+        // Open file for writing
+        File fileSD = SD.open(filename, FILE_WRITE);
+        if (fileSD) {
+            // Serialize JSON to file
+            if (serializeJsonPretty(doc, fileSD) == 0) {
+                Serial.println(F("Failed to write to SD card file"));
+            } else {
+                Serial.println("Config saved to SD card");
+            }
+            fileSD.flush();
+            fileSD.close();   
+        } else {
+            Serial.println(F("Failed to create file on SD card"));
+        }
+    }
+}
+
+/**
+ * List all files and directories in the specified directory.
+ * Prints directory contents to Serial output with file names and sizes.
+ * Used for debugging and verifying storage contents.
+ *
+ * @param fs Reference to the LittleFS_Program filesystem object
+ * @param dirname Directory path to list (e.g., "/")
+ */
+void listDir(LittleFS_Program &fs, const char *dirname) {
+    //Serial.printf("Listing directory: %s\r\n", dirname);
+
+    File root = fs.open(dirname);
+    if (!root) {
+        Serial.println("- failed to open directory");
+        return;
+    }
+    if (!root.isDirectory()) {
+        Serial.println(" - not a directory");
+        return;
+    }
+
+    File file = root.openNextFile();
+    while (file) {
+        if (file.isDirectory()) {
+            Serial.print("  DIR : ");
+            Serial.println(file.name());
+        } else {
+            Serial.print("  FILE: ");
+            Serial.print(file.name());
+            Serial.print("\tSIZE: ");
+            Serial.println(file.size());
+        }
+        file = root.openNextFile();
+    }
+}
+
+
+/**
+ * Restore the ED config_t struct from the data stored in the LittleFS.
+ * If the LittleFS file is not present, attempt to restore the data from
+ * the SD card if it is present.
+ */
+void RestoreDataFromStorage(void){
+    JsonDocument doc;
+    bool dataLoaded = false;
+    Serial.println("Files on internal storage:");
+    listDir(myfs, "/");
+
+    // Try to load from LittleFS first
+    File file = myfs.open(filename, FILE_READ);
+    if (file) {
+        DeserializationError error = deserializeJson(doc, file);
+        file.close();
+        if (error) {
+            Serial.print("Failed to parse config from LittleFS: ");
+            Serial.println(error.c_str());            
+        } else {
+            Serial.println("Config loaded from LittleFS");
+            dataLoaded = true;
+        }
+    } else {
+        Serial.println("Config file not found on LittleFS");
+    }
+
+    // If LittleFS failed and SD card is present, try SD card
+    if (!dataLoaded && SDpresent) {
+        File fileSD = SD.open(filename, FILE_READ);
+        if (fileSD) {
+            DeserializationError error = deserializeJson(doc, fileSD);
+            fileSD.close();
+            if (error) {
+                Serial.print("Failed to parse config from SD card: ");
+                Serial.println(error.c_str());
+            } else {
+                Serial.println("Config loaded from SD card");
+                dataLoaded = true;
+            }
+        } else {
+            Serial.println("Config file not found on SD card");
+        }
+    }
+
+    // If no data was loaded, keep default values
+    if (!dataLoaded) {
+        Serial.println("No config file found, using default values");
+        return;
+    }
+
+    // Restore scalar values with defaults if not present
+    ED.agc = (AGCMode)(doc["agc"] | (int)ED.agc);
+    ED.audioVolume = doc["audioVolume"] | ED.audioVolume;
+    ED.rfGainAllBands_dB = doc["rfGainAllBands_dB"] | ED.rfGainAllBands_dB;
+    ED.stepFineTune = doc["stepFineTune"] | ED.stepFineTune;
+    ED.nrOptionSelect = (NoiseReductionType)(doc["nrOptionSelect"] | (int)ED.nrOptionSelect);
+    ED.ANR_notchOn = doc["ANR_notchOn"] | ED.ANR_notchOn;
+    ED.spectrumScale = doc["spectrumScale"] | ED.spectrumScale;
+    ED.spectrumFloorAuto = doc["spectrumFloorAuto"] | ED.spectrumFloorAuto;
+    if (doc["spectrumNoiseFloor"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.spectrumNoiseFloor[i] = doc["spectrumNoiseFloor"][i] | ED.spectrumNoiseFloor[i];
+        }
+    }
+    ED.spectrum_zoom = doc["spectrum_zoom"] | ED.spectrum_zoom;
+    ED.CWFilterIndex = doc["CWFilterIndex"] | ED.CWFilterIndex;
+    ED.CWToneIndex = doc["CWToneIndex"] | ED.CWToneIndex;
+    ED.decoderFlag = doc["decoderFlag"] | ED.decoderFlag;
+    ED.keyType = (KeyTypeId)(doc["keyType"] | (int)ED.keyType);
+    ED.currentWPM = doc["currentWPM"] | ED.currentWPM;
+    ED.sidetoneVolume = doc["sidetoneVolume"] | ED.sidetoneVolume;
+    ED.freqIncrement = doc["freqIncrement"] | ED.freqIncrement;
+    ED.freqCorrectionFactor = doc["freqCorrectionFactor"] | ED.freqCorrectionFactor;
+    ED.activeVFO = doc["activeVFO"] | ED.activeVFO;
+
+    // Restore small arrays
+    if (doc["modulation"].is<JsonArray>()) {
+        ED.modulation[0] = (ModulationType)(doc["modulation"][0] | (int)ED.modulation[0]);
+        ED.modulation[1] = (ModulationType)(doc["modulation"][1] | (int)ED.modulation[1]);
+    }
+    if (doc["currentBand"].is<JsonArray>()) {
+        ED.currentBand[0] = doc["currentBand"][0] | ED.currentBand[0];
+        ED.currentBand[1] = doc["currentBand"][1] | ED.currentBand[1];
+    }
+    if (doc["centerFreq_Hz"].is<JsonArray>()) {
+        ED.centerFreq_Hz[0] = doc["centerFreq_Hz"][0] | ED.centerFreq_Hz[0];
+        ED.centerFreq_Hz[1] = doc["centerFreq_Hz"][1] | ED.centerFreq_Hz[1];
+    }
+    if (doc["fineTuneFreq_Hz"].is<JsonArray>()) {
+        ED.fineTuneFreq_Hz[0] = doc["fineTuneFreq_Hz"][0] | ED.fineTuneFreq_Hz[0];
+        ED.fineTuneFreq_Hz[1] = doc["fineTuneFreq_Hz"][1] | ED.fineTuneFreq_Hz[1];
+    }
+
+    // Restore equalizer arrays
+    if (doc["equalizerRec"].is<JsonArray>()) {
+        for(int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+            ED.equalizerRec[i] = doc["equalizerRec"][i] | ED.equalizerRec[i];
+        }
+    }
+    if (doc["equalizerXmt"].is<JsonArray>()) {
+        for(int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+            ED.equalizerXmt[i] = doc["equalizerXmt"][i] | ED.equalizerXmt[i];
+        }
+    }
+
+    ED.currentMicGain = doc["currentMicGain"] | ED.currentMicGain;
+
+    if (doc["dbm_calibration"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.dbm_calibration[i] = doc["dbm_calibration"][i] | ED.dbm_calibration[i];
+        }
+    }
+
+    // Restore band-specific arrays
+    if (doc["powerOutCW"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.powerOutCW[i] = doc["powerOutCW"][i] | ED.powerOutCW[i];
+        }
+    }
+    if (doc["powerOutSSB"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.powerOutSSB[i] = doc["powerOutSSB"][i] | ED.powerOutSSB[i];
+        }
+    }
+    if (doc["IQAmpCorrectionFactor"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.IQAmpCorrectionFactor[i] = doc["IQAmpCorrectionFactor"][i] | ED.IQAmpCorrectionFactor[i];
+        }
+    }
+    if (doc["IQPhaseCorrectionFactor"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.IQPhaseCorrectionFactor[i] = doc["IQPhaseCorrectionFactor"][i] | ED.IQPhaseCorrectionFactor[i];
+        }
+    }
+    if (doc["IQXAmpCorrectionFactor"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.IQXAmpCorrectionFactor[i] = doc["IQXAmpCorrectionFactor"][i] | ED.IQXAmpCorrectionFactor[i];
+        }
+    }
+    if (doc["IQXPhaseCorrectionFactor"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.IQXPhaseCorrectionFactor[i] = doc["IQXPhaseCorrectionFactor"][i] | ED.IQXPhaseCorrectionFactor[i];
+        }
+    }
+    if (doc["DCOffsetI"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.DCOffsetI[i] = doc["DCOffsetI"][i] | ED.DCOffsetI[i];
+        }
+    }
+    if (doc["DCOffsetQ"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.DCOffsetQ[i] = doc["DCOffsetQ"][i] | ED.DCOffsetQ[i];
+        }
+    }
+    if (doc["XAttenCW"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.XAttenCW[i] = doc["XAttenCW"][i] | ED.XAttenCW[i];
+        }
+    }
+    if (doc["RAtten"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.RAtten[i] = doc["RAtten"][i] | ED.RAtten[i];
+        }
+    }
+    if (doc["antennaSelection"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.antennaSelection[i] = doc["antennaSelection"][i] | ED.antennaSelection[i];
+        }
+    }
+    if (doc["SWR_F_SlopeAdj"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.SWR_F_SlopeAdj[i] = doc["SWR_F_SlopeAdj"][i] | ED.SWR_F_SlopeAdj[i];
+        }
+    }
+    if (doc["SWR_R_SlopeAdj"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.SWR_R_SlopeAdj[i] = doc["SWR_R_SlopeAdj"][i] | ED.SWR_R_SlopeAdj[i];
+        }
+    }
+    if (doc["SWR_R_Offset"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.SWR_R_Offset[i] = doc["SWR_R_Offset"][i] | ED.SWR_R_Offset[i];
+        }
+    }
+    if (doc["SWR_F_Offset"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.SWR_F_Offset[i] = doc["SWR_F_Offset"][i] | ED.SWR_F_Offset[i];
+        }
+    }
+
+    // Restore multi-dimensional lastFrequencies array
+    if (doc["lastFrequencies"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            if (doc["lastFrequencies"][i].is<JsonArray>()) {
+                for(int j = 0; j < 3; j++) {
+                    ED.lastFrequencies[i][j] = doc["lastFrequencies"][i][j] | ED.lastFrequencies[i][j];
+                }
+            }
+        }
+    }
+
+    ED.keyerFlip = doc["keyerFlip"] | ED.keyerFlip;
+    ED.PA100Wactive = doc["PA100Wactive"] | ED.PA100Wactive;
+
+    // Restore power calibration arrays
+    if (doc["PowerCal_20W_Psat_mW"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.PowerCal_20W_Psat_mW[i] = doc["PowerCal_20W_Psat_mW"][i] | ED.PowerCal_20W_Psat_mW[i];
+        }
+    }
+    if (doc["PowerCal_20W_kindex"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.PowerCal_20W_kindex[i] = doc["PowerCal_20W_kindex"][i] | ED.PowerCal_20W_kindex[i];
+        }
+    }
+    if (doc["PowerCal_100W_Psat_mW"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.PowerCal_100W_Psat_mW[i] = doc["PowerCal_100W_Psat_mW"][i] | ED.PowerCal_100W_Psat_mW[i];
+        }
+    }
+    if (doc["PowerCal_100W_kindex"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.PowerCal_100W_kindex[i] = doc["PowerCal_100W_kindex"][i] | ED.PowerCal_100W_kindex[i];
+        }
+    }
+    if (doc["PowerCal_20W_DSP_Gain_correction_dB"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.PowerCal_20W_DSP_Gain_correction_dB[i] = doc["PowerCal_20W_DSP_Gain_correction_dB"][i] | ED.PowerCal_20W_DSP_Gain_correction_dB[i];
+        }
+    }
+    if (doc["PowerCal_100W_DSP_Gain_correction_dB"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.PowerCal_100W_DSP_Gain_correction_dB[i] = doc["PowerCal_100W_DSP_Gain_correction_dB"][i] | ED.PowerCal_100W_DSP_Gain_correction_dB[i];
+        }
+    }
+
+    ED.PowerCal_20W_to_100W_threshold_W = doc["PowerCal_20W_to_100W_threshold_W"] | ED.PowerCal_20W_to_100W_threshold_W;
+
+    Serial.println("Config data restored successfully");
+}
+
+/**
+ * Restore the ED config_t struct from the data stored on the SD card 
+ * if it is present.
+ */
+void RestoreDataFromSDCard(void){
+    JsonDocument doc;
+    bool dataLoaded = false;
+
+    // If SD card is present, try SD card
+    if (SDpresent) {
+        File fileSD = SD.open(filename, FILE_READ);
+        if (fileSD) {
+            DeserializationError error = deserializeJson(doc, fileSD);
+            fileSD.close();
+            if (error) {
+                Serial.print("Failed to parse config from SD card: ");
+                Serial.println(error.c_str());
+            } else {
+                Serial.println("Config loaded from SD card");
+                dataLoaded = true;
+            }
+        } else {
+            Serial.println("Config file not found on SD card");
+        }
+    } else {
+        Serial.println("SD card not present!");
+    }
+
+    // If no data was loaded, keep default values
+    if (!dataLoaded) {
+        Serial.println("No config file found, using prior values");
+        return;
+    }
+
+    // Restore scalar values with defaults if not present
+    ED.agc = (AGCMode)(doc["agc"] | (int)ED.agc);
+    ED.audioVolume = doc["audioVolume"] | ED.audioVolume;
+    ED.rfGainAllBands_dB = doc["rfGainAllBands_dB"] | ED.rfGainAllBands_dB;
+    ED.stepFineTune = doc["stepFineTune"] | ED.stepFineTune;
+    ED.nrOptionSelect = (NoiseReductionType)(doc["nrOptionSelect"] | (int)ED.nrOptionSelect);
+    ED.ANR_notchOn = doc["ANR_notchOn"] | ED.ANR_notchOn;
+    ED.spectrumScale = doc["spectrumScale"] | ED.spectrumScale;
+    ED.spectrumFloorAuto = doc["spectrumFloorAuto"] | ED.spectrumFloorAuto;
+    if (doc["spectrumNoiseFloor"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.spectrumNoiseFloor[i] = doc["spectrumNoiseFloor"][i] | ED.spectrumNoiseFloor[i];
+        }
+    }
+    ED.spectrum_zoom = doc["spectrum_zoom"] | ED.spectrum_zoom;
+    ED.CWFilterIndex = doc["CWFilterIndex"] | ED.CWFilterIndex;
+    ED.CWToneIndex = doc["CWToneIndex"] | ED.CWToneIndex;
+    ED.decoderFlag = doc["decoderFlag"] | ED.decoderFlag;
+    ED.keyType = (KeyTypeId)(doc["keyType"] | (int)ED.keyType);
+    ED.currentWPM = doc["currentWPM"] | ED.currentWPM;
+    ED.sidetoneVolume = doc["sidetoneVolume"] | ED.sidetoneVolume;
+    ED.freqIncrement = doc["freqIncrement"] | ED.freqIncrement;
+    ED.freqCorrectionFactor = doc["freqCorrectionFactor"] | ED.freqCorrectionFactor;
+    ED.activeVFO = doc["activeVFO"] | ED.activeVFO;
+
+    // Restore small arrays
+    if (doc["modulation"].is<JsonArray>()) {
+        ED.modulation[0] = (ModulationType)(doc["modulation"][0] | (int)ED.modulation[0]);
+        ED.modulation[1] = (ModulationType)(doc["modulation"][1] | (int)ED.modulation[1]);
+    }
+    if (doc["currentBand"].is<JsonArray>()) {
+        ED.currentBand[0] = doc["currentBand"][0] | ED.currentBand[0];
+        ED.currentBand[1] = doc["currentBand"][1] | ED.currentBand[1];
+    }
+    if (doc["centerFreq_Hz"].is<JsonArray>()) {
+        ED.centerFreq_Hz[0] = doc["centerFreq_Hz"][0] | ED.centerFreq_Hz[0];
+        ED.centerFreq_Hz[1] = doc["centerFreq_Hz"][1] | ED.centerFreq_Hz[1];
+    }
+    if (doc["fineTuneFreq_Hz"].is<JsonArray>()) {
+        ED.fineTuneFreq_Hz[0] = doc["fineTuneFreq_Hz"][0] | ED.fineTuneFreq_Hz[0];
+        ED.fineTuneFreq_Hz[1] = doc["fineTuneFreq_Hz"][1] | ED.fineTuneFreq_Hz[1];
+    }
+
+    // Restore equalizer arrays
+    if (doc["equalizerRec"].is<JsonArray>()) {
+        for(int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+            ED.equalizerRec[i] = doc["equalizerRec"][i] | ED.equalizerRec[i];
+        }
+    }
+    if (doc["equalizerXmt"].is<JsonArray>()) {
+        for(int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+            ED.equalizerXmt[i] = doc["equalizerXmt"][i] | ED.equalizerXmt[i];
+        }
+    }
+
+    ED.currentMicGain = doc["currentMicGain"] | ED.currentMicGain;
+
+    if (doc["dbm_calibration"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.dbm_calibration[i] = doc["dbm_calibration"][i] | ED.dbm_calibration[i];
+        }
+    }
+
+    // Restore band-specific arrays
+    if (doc["powerOutCW"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.powerOutCW[i] = doc["powerOutCW"][i] | ED.powerOutCW[i];
+        }
+    }
+    if (doc["powerOutSSB"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.powerOutSSB[i] = doc["powerOutSSB"][i] | ED.powerOutSSB[i];
+        }
+    }
+    if (doc["IQAmpCorrectionFactor"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.IQAmpCorrectionFactor[i] = doc["IQAmpCorrectionFactor"][i] | ED.IQAmpCorrectionFactor[i];
+        }
+    }
+    if (doc["IQPhaseCorrectionFactor"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.IQPhaseCorrectionFactor[i] = doc["IQPhaseCorrectionFactor"][i] | ED.IQPhaseCorrectionFactor[i];
+        }
+    }
+    if (doc["IQXAmpCorrectionFactor"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.IQXAmpCorrectionFactor[i] = doc["IQXAmpCorrectionFactor"][i] | ED.IQXAmpCorrectionFactor[i];
+        }
+    }
+    if (doc["IQXPhaseCorrectionFactor"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.IQXPhaseCorrectionFactor[i] = doc["IQXPhaseCorrectionFactor"][i] | ED.IQXPhaseCorrectionFactor[i];
+        }
+    }
+    if (doc["DCOffsetI"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.DCOffsetI[i] = doc["DCOffsetI"][i] | ED.DCOffsetI[i];
+        }
+    }
+    if (doc["DCOffsetQ"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.DCOffsetQ[i] = doc["DCOffsetQ"][i] | ED.DCOffsetQ[i];
+        }
+    }
+    if (doc["XAttenCW"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.XAttenCW[i] = doc["XAttenCW"][i] | ED.XAttenCW[i];
+        }
+    }
+    if (doc["RAtten"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.RAtten[i] = doc["RAtten"][i] | ED.RAtten[i];
+        }
+    }
+    if (doc["antennaSelection"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.antennaSelection[i] = doc["antennaSelection"][i] | ED.antennaSelection[i];
+        }
+    }
+    if (doc["SWR_F_SlopeAdj"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.SWR_F_SlopeAdj[i] = doc["SWR_F_SlopeAdj"][i] | ED.SWR_F_SlopeAdj[i];
+        }
+    }
+    if (doc["SWR_R_SlopeAdj"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.SWR_R_SlopeAdj[i] = doc["SWR_R_SlopeAdj"][i] | ED.SWR_R_SlopeAdj[i];
+        }
+    }
+    if (doc["SWR_R_Offset"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.SWR_R_Offset[i] = doc["SWR_R_Offset"][i] | ED.SWR_R_Offset[i];
+        }
+    }
+    if (doc["SWR_F_Offset"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.SWR_F_Offset[i] = doc["SWR_F_Offset"][i] | ED.SWR_F_Offset[i];
+        }
+    }
+
+    // Restore multi-dimensional lastFrequencies array
+    if (doc["lastFrequencies"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            if (doc["lastFrequencies"][i].is<JsonArray>()) {
+                for(int j = 0; j < 3; j++) {
+                    ED.lastFrequencies[i][j] = doc["lastFrequencies"][i][j] | ED.lastFrequencies[i][j];
+                }
+            }
+        }
+    }
+
+    ED.keyerFlip = doc["keyerFlip"] | ED.keyerFlip;
+    ED.PA100Wactive = doc["PA100Wactive"] | ED.PA100Wactive;
+
+    // Restore power calibration arrays
+    if (doc["PowerCal_20W_Psat_mW"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.PowerCal_20W_Psat_mW[i] = doc["PowerCal_20W_Psat_mW"][i] | ED.PowerCal_20W_Psat_mW[i];
+        }
+    }
+    if (doc["PowerCal_20W_kindex"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.PowerCal_20W_kindex[i] = doc["PowerCal_20W_kindex"][i] | ED.PowerCal_20W_kindex[i];
+        }
+    }
+    if (doc["PowerCal_100W_Psat_mW"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.PowerCal_100W_Psat_mW[i] = doc["PowerCal_100W_Psat_mW"][i] | ED.PowerCal_100W_Psat_mW[i];
+        }
+    }
+    if (doc["PowerCal_100W_kindex"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.PowerCal_100W_kindex[i] = doc["PowerCal_100W_kindex"][i] | ED.PowerCal_100W_kindex[i];
+        }
+    }
+    if (doc["PowerCal_20W_DSP_Gain_correction_dB"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.PowerCal_20W_DSP_Gain_correction_dB[i] = doc["PowerCal_20W_DSP_Gain_correction_dB"][i] | ED.PowerCal_20W_DSP_Gain_correction_dB[i];
+        }
+    }
+    if (doc["PowerCal_100W_DSP_Gain_correction_dB"].is<JsonArray>()) {
+        for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+            ED.PowerCal_100W_DSP_Gain_correction_dB[i] = doc["PowerCal_100W_DSP_Gain_correction_dB"][i] | ED.PowerCal_100W_DSP_Gain_correction_dB[i];
+        }
+    }
+
+    ED.PowerCal_20W_to_100W_threshold_W = doc["PowerCal_20W_to_100W_threshold_W"] | ED.PowerCal_20W_to_100W_threshold_W;
+
+    // Save the data to the EEPROM so that it matches
+    SaveDataToStorage(false);
+    Serial.println("Config data restored successfully");
+}
+
+void PrintEDToSerial(void){
+    char buff[30];
+    Serial.println("=== ED Struct Contents ===");
+    Serial.print("agc:               "); Serial.println(ED.agc);
+    Serial.print("audioVolume:       "); Serial.println(ED.audioVolume);
+    Serial.print("rfGainAllBands_dB: "); Serial.println(ED.rfGainAllBands_dB);
+    Serial.print("stepFineTune:      "); Serial.println(ED.stepFineTune);
+    Serial.print("nrOptionSelect:    "); Serial.println(ED.nrOptionSelect);
+    Serial.print("ANR_notchOn:       "); Serial.println(ED.ANR_notchOn);
+    Serial.print("spectrumScale:     "); Serial.println(ED.spectrumScale);
+    Serial.print("spectrumFloorAuto: "); Serial.println(ED.spectrumFloorAuto);
+    Serial.print("spectrumNoiseFloor:");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.spectrumNoiseFloor[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+    Serial.print("spectrum_zoom:     "); Serial.println(ED.spectrum_zoom);
+    Serial.print("CWFilterIndex:     "); Serial.println(ED.CWFilterIndex);
+    Serial.print("CWToneIndex:       "); Serial.println(ED.CWToneIndex);
+    Serial.print("decoderFlag:       "); Serial.println(ED.decoderFlag);
+    Serial.print("keyType:           "); Serial.println(ED.keyType);
+    Serial.print("currentWPM:        "); Serial.println(ED.currentWPM);
+    Serial.print("sidetoneVolume:    "); Serial.println(ED.sidetoneVolume);
+    Serial.print("freqIncrement:     "); Serial.println(ED.freqIncrement);
+    Serial.print("freqCorrectionFactor: "); Serial.println(ED.freqCorrectionFactor);
+    Serial.print("activeVFO:         "); Serial.println(ED.activeVFO);
+    Serial.print("modulation[0]:     "); Serial.println(ED.modulation[0]);
+    Serial.print("modulation[1]:     "); Serial.println(ED.modulation[1]);
+    Serial.print("currentBand[0]:    "); Serial.println(ED.currentBand[0]);
+    Serial.print("currentBand[1]:    "); Serial.println(ED.currentBand[1]);
+    Serial.print("centerFreq_Hz[0]:  "); Serial.println(ED.centerFreq_Hz[0]);
+    Serial.print("centerFreq_Hz[1]:  "); Serial.println(ED.centerFreq_Hz[1]);
+    Serial.print("fineTuneFreq_Hz[0]: "); Serial.println(ED.fineTuneFreq_Hz[0]);
+    Serial.print("fineTuneFreq_Hz[1]: "); Serial.println(ED.fineTuneFreq_Hz[1]);
+    Serial.print("currentMicGain:    "); Serial.println(ED.currentMicGain);
+    Serial.print("dbm_calibration: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.dbm_calibration[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+    Serial.print("keyerFlip:         "); Serial.println(ED.keyerFlip);
+    Serial.print("PA100Wactive:      "); Serial.println(ED.PA100Wactive);
+
+    Serial.print("equalizerRec: ");
+    for(int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+        Serial.print(ED.equalizerRec[i]);
+        if(i < EQUALIZER_CELL_COUNT-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("equalizerXmt: ");
+    for(int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+        Serial.print(ED.equalizerXmt[i]);
+        if(i < EQUALIZER_CELL_COUNT-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("powerOutCW: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.powerOutCW[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("powerOutSSB: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.powerOutSSB[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("RAtten: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.RAtten[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("XAttenCW: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.XAttenCW[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("IQAmpCorrectionFactor: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        sprintf(buff,"%4.3f",ED.IQAmpCorrectionFactor[i]);
+        Serial.print(buff);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("IQPhaseCorrectionFactor: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        sprintf(buff,"%4.3f",ED.IQPhaseCorrectionFactor[i]);
+        Serial.print(buff);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("IQXAmpCorrectionFactor: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        sprintf(buff,"%4.3f",ED.IQXAmpCorrectionFactor[i]);
+        Serial.print(buff);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("IQXPhaseCorrectionFactor: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        sprintf(buff,"%4.3f",ED.IQXPhaseCorrectionFactor[i]);
+        Serial.print(buff);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("DCOffsetI: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.DCOffsetI[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("DCOffsetQ: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.DCOffsetQ[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("antennaSelection: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.antennaSelection[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.println("lastFrequencies (center, fine, modulation):");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print("  Band "); Serial.print(i); Serial.print(": ");
+        Serial.print(ED.lastFrequencies[i][0]); Serial.print(", ");
+        Serial.print(ED.lastFrequencies[i][1]); Serial.print(", ");
+        Serial.println(ED.lastFrequencies[i][2]);
+    }
+
+    Serial.print("PowerCal_20W_Psat_mW: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.PowerCal_20W_Psat_mW[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("PowerCal_20W_kindex: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.PowerCal_20W_kindex[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("PowerCal_100W_Psat_mW: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.PowerCal_100W_Psat_mW[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("PowerCal_100W_kindex: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.PowerCal_100W_kindex[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("PowerCal_20W_DSP_Gain_correction_dB: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.PowerCal_20W_DSP_Gain_correction_dB[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("PowerCal_100W_DSP_Gain_correction_dB: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.PowerCal_100W_DSP_Gain_correction_dB[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("PowerCal_20W_to_100W_threshold_W: ");
+    Serial.println(ED.PowerCal_20W_to_100W_threshold_W);
+
+    Serial.print("SWR_F_SlopeAdj: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.SWR_F_SlopeAdj[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("SWR_R_SlopeAdj: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.SWR_R_SlopeAdj[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("SWR_R_Offset: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.SWR_R_Offset[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.print("SWR_F_Offset: ");
+    for(int i = 0; i < NUMBER_OF_BANDS; i++) {
+        Serial.print(ED.SWR_F_Offset[i]);
+        if(i < NUMBER_OF_BANDS-1) Serial.print(",");
+    }
+    Serial.println();
+
+    Serial.println("=== End ED Struct ===");
+}

@@ -117,6 +117,10 @@ void SaveDataToStorage(bool savetosd){
 
     doc["PowerCal_20W_to_100W_threshold_W"] = ED.PowerCal_20W_to_100W_threshold_W;
 
+    // Operator identity (FT8 + future digital modes)
+    doc["callsign"] = ED.callsign;
+    doc["grid"]     = ED.grid;
+
     // Write this JSON object to filename on the LittleFS
     // Delete existing file, otherwise data is appended to the file
     myfs.remove(filename);
@@ -430,6 +434,15 @@ void RestoreDataFromStorage(void){
 
     ED.PowerCal_20W_to_100W_threshold_W = doc["PowerCal_20W_to_100W_threshold_W"] | ED.PowerCal_20W_to_100W_threshold_W;
 
+    // Operator identity (FT8 + future digital modes). String fields use ArduinoJson's
+    // default-fallback pattern: read as const char*, copy if present, else keep current.
+    {
+        const char *cs = doc["callsign"] | (const char*)nullptr;
+        if (cs != nullptr) { strncpy(ED.callsign, cs, sizeof(ED.callsign) - 1); ED.callsign[sizeof(ED.callsign) - 1] = '\0'; }
+        const char *gr = doc["grid"] | (const char*)nullptr;
+        if (gr != nullptr) { strncpy(ED.grid, gr, sizeof(ED.grid) - 1); ED.grid[sizeof(ED.grid) - 1] = '\0'; }
+    }
+
     Serial.println("Config data restored successfully");
 }
 
@@ -654,6 +667,14 @@ void RestoreDataFromSDCard(void){
     }
 
     ED.PowerCal_20W_to_100W_threshold_W = doc["PowerCal_20W_to_100W_threshold_W"] | ED.PowerCal_20W_to_100W_threshold_W;
+
+    // Operator identity (FT8 + future digital modes).
+    {
+        const char *cs = doc["callsign"] | (const char*)nullptr;
+        if (cs != nullptr) { strncpy(ED.callsign, cs, sizeof(ED.callsign) - 1); ED.callsign[sizeof(ED.callsign) - 1] = '\0'; }
+        const char *gr = doc["grid"] | (const char*)nullptr;
+        if (gr != nullptr) { strncpy(ED.grid, gr, sizeof(ED.grid) - 1); ED.grid[sizeof(ED.grid) - 1] = '\0'; }
+    }
 
     // Save the data to the EEPROM so that it matches
     SaveDataToStorage(false);

@@ -17,6 +17,7 @@
 #include "SDT.h"
 #include "LPFBoard.h"
 #include "MainBoard_Display.h"
+#include "MainBoard_DisplayFT8.h"
 #include <RA8875.h>
 #include <TimeLib.h>
 #include "FreeSansBold24pt7b.h"
@@ -346,6 +347,12 @@ void DrawFreqBandModPane(void) {
             break;
         case IQ:
             tft.print("(IQ)");
+            break;
+        case NFM:
+            tft.print("(NFM)");
+            break;
+        case FT8_INTERNAL:
+            tft.print("(FT8)");
             break;
         case DCF77:
             tft.print("(DCF77)");
@@ -725,6 +732,34 @@ void DrawSpectrumPane(void) {
         (oft != ED.fineTuneFreq_Hz[ED.activeVFO]) ||
         (omd != ED.modulation[ED.activeVFO])){
         PaneSpectrum.stale = true;
+    }
+
+    /* FT8 dispatch: when in FT8_INTERNAL mode, render the FT8 message list
+     * over the spectrum pane area instead of the spectrum/waterfall.
+     * MainBoard_DisplayFT8.cpp owns the rendering. */
+    if (ED.modulation[ED.activeVFO] == FT8_INTERNAL) {
+        if (PaneSpectrum.stale) {
+            DrawFT8MessageList(PaneSpectrum.x0, PaneSpectrum.y0,
+                               PaneSpectrum.width, PaneSpectrum.height);
+            omd = ED.modulation[ED.activeVFO];
+            PaneSpectrum.stale = false;
+        }
+        return;
+    }
+
+    /* Transition OUT of FT8: clear the entire pane area on both layers so
+     * the FT8 text columns don't persist in the waterfall region while the
+     * waterfall slowly scrolls fresh data over them. The normal draw paths
+     * below repaint the spectrum trace top + frequency-bar overlay, but
+     * never blank-clear the pane themselves. */
+    if (omd == FT8_INTERNAL) {
+        tft.writeTo(L2);
+        tft.fillRect(PaneSpectrum.x0, PaneSpectrum.y0,
+                     PaneSpectrum.width, PaneSpectrum.height, RA8875_BLACK);
+        tft.writeTo(L1);
+        tft.fillRect(PaneSpectrum.x0, PaneSpectrum.y0,
+                     PaneSpectrum.width, PaneSpectrum.height, RA8875_BLACK);
+        /* omd will be updated to the current modulation further down. */
     }
 
     if (psdupdated && redrawSpectrum){

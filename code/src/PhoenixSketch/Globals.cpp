@@ -7,6 +7,7 @@
  */
 
 #include "SDT.h"
+#include "DSP_FT8.h"  // for InitializeFT8() called from setup()
 
 struct config_t ED;
 bool psdupdated = false;
@@ -511,6 +512,7 @@ void setup(void){
     Serial.println("...Initializing hardware");
     InitializeFrontPanel();
     InitializeSignalProcessing();  // Initialize DSP before starting audio
+    InitializeFT8();               // Allocate FT8 slot buffer + prime ft8_lib (idempotent)
     InitializeAudio();
     InitializeDisplay();
     InitializeRFHardware(); // RF board, LPF board, and BPF board
