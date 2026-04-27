@@ -88,4 +88,66 @@ void PSK31DBPSKDecode(const DataBlock *data, uint8_t *output);
  */
 void ResetPSK31Decoder(void);
 
+/* ============================================================
+ * Phoenix-native end-to-end decoder.
+ *
+ * Built on top of the primitives above. Implements the full receive chain:
+ *   audio in -> NCO mix to baseband -> low-pass -> decimate -> Gardner
+ *   symbol-clock recovery -> DBPSK -> varicode -> decoded-text ring buffer.
+ *
+ * Used via the FT8-style mode dispatch: when ED.modulation == PSK31, the
+ * Demodulate() dispatcher in DSP.cpp calls psk31Demod(data) per audio block;
+ * the display layer reads the ring buffer to render decoded text.
+ * ============================================================ */
+
+/* PSK31 audio-carrier frequency (Hz). Adjustable via the fine-tune encoder
+ * in PSK31 mode and via the PSK31 menu page. Range 200-2700 Hz. */
+extern int psk31RxFreq;
+
+/**
+ * @brief Phoenix dispatcher entry. Run one audio block through the PSK31
+ *        decode chain.
+ * @param data  DataBlock with the I/Q output of the IFFT in data->I/data->Q
+ *              at audio rate (typically 24 kHz).
+ * @note Maintains internal pipeline state across calls (NCO phase, low-pass
+ *       state, decimator counter, Gardner mu, varicode shift register, ring
+ *       buffer). Decoded characters land in the text ring buffer for the
+ *       display layer to consume.
+ */
+void psk31Demod(DataBlock *data);
+
+/**
+ * @brief Adjust the PSK31 audio receive frequency by a fixed step.
+ * @param wheel Encoder ticks; positive = up, negative = down. 5 Hz per tick.
+ * @note Bounds-checked to [200, 2700] Hz. Resets the decoder pipeline so
+ *       the new carrier doesn't get glitched samples from the old one.
+ *       Marks the PSK31 pane stale.
+ */
+void ChangePSK31RxFreq(int wheel);
+
+/* Decoded-text ring buffer size (chars). Older characters are overwritten. */
+#define PSK31_TEXT_BUFFER_SIZE  256
+
+/**
+ * @brief Read a contiguous snapshot of the decoded-text ring buffer.
+ * @param[out] out      Caller-provided buffer to fill.
+ * @param[in]  outMax   Size of caller's buffer.
+ * @return Number of chars written (always nul-terminated; never exceeds outMax-1).
+ * @note Returns the buffer linearised so callers don't have to handle the ring.
+ *       Newest character is at index (returned_length - 1).
+ */
+int PSK31GetText(char *out, int outMax);
+
+/**
+ * @brief Clear the decoded-text ring buffer.
+ */
+void PSK31ClearText(void);
+
+/**
+ * @brief Reset the full decoder pipeline (mixer + filter + clock + varicode).
+ * @note Same as ChangePSK31RxFreq's reset side-effect, but without changing
+ *       the frequency. Useful when entering PSK31 mode from another mode.
+ */
+void ResetPSK31Pipeline(void);
+
 #endif /* DSP_PSK31_H */

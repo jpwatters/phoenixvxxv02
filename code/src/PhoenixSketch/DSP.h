@@ -161,6 +161,16 @@ void nfmdemod(DataBlock *data);
 void ft8InternalDemod(DataBlock *data);
 
 /**
+ * @brief PSK31 dispatcher entry point called from Demodulate() when modulation == PSK31.
+ * @param data Pointer to DataBlock with audio-rate I/Q output of the IFFT.
+ * @note Implemented in DSP_PSK31.cpp. Performs NCO mix to baseband at psk31RxFreq,
+ *       low-pass filter, decimate to 250 sps, Gardner symbol-clock recovery, DBPSK
+ *       decode, varicode decode, and pushes decoded chars to a ring buffer for
+ *       MainBoard_DisplayPSK31 to render.
+ */
+void psk31Demod(DataBlock *data);
+
+/**
  * @brief Apply noise reduction to received audio
  * @param data Pointer to DataBlock containing demodulated audio
  * @note Implements spectral subtraction or adaptive filtering for noise suppression

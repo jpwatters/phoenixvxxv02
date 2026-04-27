@@ -8,7 +8,7 @@
 //  3 = Triple Serial            (Tools > USB Type > Triple Serial)
 // ============================================================
 
-#define REQUIRED_USB_MODE 3   // <-- change to 1, 2, or 3
+#define REQUIRED_USB_MODE 1   // <-- change to 1, 2, or 3
 
 
 // ---------- Board OK? ----------

@@ -424,6 +424,9 @@ char *IF_read(  char* cmd ){
             case FT8_INTERNAL:
                 mode = 9; // Kenwood TS-480 DATA (used by WSJT-X for FT8)
                 break;
+            case PSK31:
+                mode = 7; // Kenwood TS-480 FSK (closest match for PSK31)
+                break;
             default:
                 mode = 1; // LSB
                 break;
@@ -519,6 +522,11 @@ char *MD_write( char* cmd  ){
             ED.modulation[ED.activeVFO] = NFM;
             SetInterrupt(iMODE);
             break;
+        case 7: // Kenwood FSK -> Phoenix PSK31
+            bands[ ED.currentBand[ED.activeVFO] ].mode = PSK31;
+            ED.modulation[ED.activeVFO] = PSK31;
+            SetInterrupt(iMODE);
+            break;
         case 9: // Kenwood DATA -> Phoenix FT8_INTERNAL
             bands[ ED.currentBand[ED.activeVFO] ].mode = FT8_INTERNAL;
             ED.modulation[ED.activeVFO] = FT8_INTERNAL;
@@ -552,6 +560,8 @@ char *MD_read( char* cmd ){
     /* Kenwood TS-480 mode 9 = DATA. WSJT-X uses this when configured for data
      * modes; consider this our advertisement that the rig is ready for FT8. */
     if( bands[ ED.currentBand[ED.activeVFO] ].mode == FT8_INTERNAL ){ sprintf( obuf, "MD9;" ); return obuf; }
+    /* Kenwood TS-480 mode 7 = FSK. Closest standard mapping for PSK31. */
+    if( bands[ ED.currentBand[ED.activeVFO] ].mode == PSK31 ){ sprintf( obuf, "MD7;" ); return obuf; }
     sprintf( obuf, "?;");
     return obuf;  //Huh? How'd we get here?
 }
@@ -837,6 +847,7 @@ char *SF_read( char* cmd ){
             case SAM: mode = 5; break;
             case NFM: mode = 4; break;        /* Kenwood FM */
             case FT8_INTERNAL: mode = 9; break; /* Kenwood DATA */
+            case PSK31: mode = 7; break;        /* Kenwood FSK */
             default:  mode = 1; break;
         }
     }

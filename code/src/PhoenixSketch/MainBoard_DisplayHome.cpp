@@ -18,6 +18,7 @@
 #include "LPFBoard.h"
 #include "MainBoard_Display.h"
 #include "MainBoard_DisplayFT8.h"
+#include "MainBoard_DisplayPSK31.h"
 #include <RA8875.h>
 #include <TimeLib.h>
 #include "FreeSansBold24pt7b.h"
@@ -353,6 +354,9 @@ void DrawFreqBandModPane(void) {
             break;
         case FT8_INTERNAL:
             tft.print("(FT8)");
+            break;
+        case PSK31:
+            tft.print("(PSK)");
             break;
         case DCF77:
             tft.print("(DCF77)");
@@ -747,12 +751,24 @@ void DrawSpectrumPane(void) {
         return;
     }
 
-    /* Transition OUT of FT8: clear the entire pane area on both layers so
-     * the FT8 text columns don't persist in the waterfall region while the
-     * waterfall slowly scrolls fresh data over them. The normal draw paths
-     * below repaint the spectrum trace top + frequency-bar overlay, but
-     * never blank-clear the pane themselves. */
-    if (omd == FT8_INTERNAL) {
+    /* PSK31 dispatch: same pattern. Decoded-text pane lives in
+     * MainBoard_DisplayPSK31.cpp. */
+    if (ED.modulation[ED.activeVFO] == PSK31) {
+        if (PaneSpectrum.stale) {
+            DrawPSK31Pane(PaneSpectrum.x0, PaneSpectrum.y0,
+                          PaneSpectrum.width, PaneSpectrum.height);
+            omd = ED.modulation[ED.activeVFO];
+            PaneSpectrum.stale = false;
+        }
+        return;
+    }
+
+    /* Transition OUT of FT8 or PSK31: clear the entire pane area on both
+     * layers so the digital-mode text doesn't persist in the waterfall
+     * region while the waterfall slowly scrolls fresh data over it. The
+     * normal draw paths below repaint the spectrum trace top + frequency-bar
+     * overlay, but never blank-clear the pane themselves. */
+    if (omd == FT8_INTERNAL || omd == PSK31) {
         tft.writeTo(L2);
         tft.fillRect(PaneSpectrum.x0, PaneSpectrum.y0,
                      PaneSpectrum.width, PaneSpectrum.height, RA8875_BLACK);

@@ -86,6 +86,7 @@
 
 #include "SDT.h"
 #include "DSP_FT8.h"  // for RunFT8DecoderLoop() called each loop iteration
+#include "DSP_PSK31.h"  // for ChangePSK31RxFreq encoder binding
 #include "MainBoard_TextEditor.h"  // for TextEditorTick / IsActive / Commit / Cancel
 
 // FIFO buffer for interrupt events
@@ -499,7 +500,7 @@ void HandleButtonPress(int32_t button){
                 case DEMODULATION:{
                     // Rotate through the modulation types: USB, LSB, AM, SAM, NFM, FT8_INTERNAL.
                     // IQ and DCF77 are intentionally skipped (not normal RX modes for the operator).
-                    static const ModulationType cycle[] = {USB, LSB, AM, SAM, NFM, FT8_INTERNAL};
+                    static const ModulationType cycle[] = {USB, LSB, AM, SAM, NFM, FT8_INTERNAL, PSK31};
                     const size_t cycleLen = sizeof(cycle) / sizeof(cycle[0]);
                     size_t i = 0;
                     for (i = 0; i < cycleLen; i++) {
@@ -698,7 +699,7 @@ void HandleButtonPress(int32_t button){
                 }
                 case DEMODULATION:{
                     // Same cycle as the HOME/UPDATE handler above.
-                    static const ModulationType cycle[] = {USB, LSB, AM, SAM, NFM, FT8_INTERNAL};
+                    static const ModulationType cycle[] = {USB, LSB, AM, SAM, NFM, FT8_INTERNAL, PSK31};
                     const size_t cycleLen = sizeof(cycle) / sizeof(cycle[0]);
                     size_t i = 0;
                     for (i = 0; i < cycleLen; i++) {
@@ -1102,13 +1103,13 @@ void ConsumeInterrupt(void){
                     break;
                 }
                 case (iFINETUNE_INCREASE):{
-                    /* In FT8 mode the fine-tune encoder repurposes to adjust
-                     * the FT8 RX audio frequency (the SSB VFO is left alone,
-                     * since FT8 sits at fixed audio offsets within it).
-                     * ChangeFT8RxFreq applies a 5 Hz step per click and
-                     * mirrors to ft8TxFreq when txEqualsRx is true. */
+                    /* In FT8 / PSK31 modes the fine-tune encoder repurposes to
+                     * adjust the digital-mode RX audio frequency (SSB VFO is
+                     * left alone). 5 Hz step per click. */
                     if (ED.modulation[ED.activeVFO] == FT8_INTERNAL) {
                         ChangeFT8RxFreq(+1);
+                    } else if (ED.modulation[ED.activeVFO] == PSK31) {
+                        ChangePSK31RxFreq(+1);
                     } else {
                         AdjustFineTune(+1);
                     }
@@ -1117,6 +1118,8 @@ void ConsumeInterrupt(void){
                 case (iFINETUNE_DECREASE):{
                     if (ED.modulation[ED.activeVFO] == FT8_INTERNAL) {
                         ChangeFT8RxFreq(-1);
+                    } else if (ED.modulation[ED.activeVFO] == PSK31) {
+                        ChangePSK31RxFreq(-1);
                     } else {
                         AdjustFineTune(-1);
                     }

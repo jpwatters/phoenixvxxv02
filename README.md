@@ -1,19 +1,26 @@
-# This repository 
+Ôªø# This repository 
 
 This repository had been updated by KC9KKO and N3DS with code for 		FT8(Internal to the T41), WSJT-X connectivity via USB, 
 	a Wireless Keyboard and mouse driver.
 
-FT8( Internal )	based on KN6ZDE’s experimental implementation.
+FT8( Internal )	based on KN6ZDE’≥ experimental implementation.
 			in addition screens for FT8 display as added.
 
-WSJT-X USB connection also based on KN6ZDE’s experimental code.
-Updates to Phoenix’s CAT via USB integrated WSJT-X.
+WSJT-X USB connection also based on KN6ZDE’≥ experimental code.
+Updates to Phoenix’≥ CAT via USB integrated WSJT-X.
 
 
 Keyboard and Mouse was updated to allow for wireless connections.
 
+The Arduino IDE Compilation of Teensy 4.1 board code, utilizing 
+CPU SPEED = 528mhz,USB Type = Dual Serial, and Optimized for 
+Fastest with LTO.
 
-
+Memory Usage on Teensy 4.1:
+  FLASH: code:347676, data:80492, headers:9076   free for files:7689220
+   RAM1: variables:153344, code:344776, padding:15672   free for local variables:10496
+   RAM2: variables:302528  free for malloc/new:221760
+ EXTRAM: variables:721920
 	
 This is a new software approach, called Phoenix, for the T41-EP radio running V12 hardware. It is a ground-up rewrite of the T41 software, which had been authored by dozens of people over the years. I have listed the known authors that left their call signs in the code in the file `code/Contributors.txt` -- please let me know if I've missed anyone!
 

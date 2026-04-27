@@ -1,6 +1,7 @@
 #include "SDT.h"
-#include "DSP.h"          // for ApproxAtan2
+#include "DSP.h"                  // for ApproxAtan2
 #include "DSP_PSK31.h"
+#include "MainBoard_Display.h"    // for the Pane struct used to flag PaneSpectrum stale
 
 /*
  * PSK31 primitives (data tables + clean DBPSK demod).
@@ -212,5 +213,244 @@ void PSK31DBPSKDecode(const DataBlock *data, uint8_t *output) {
             output[i] = 1;
         }
         s_last_phase = phase;
+    }
+}
+
+/* ============================================================
+ * Phoenix-native PSK31 decoder pipeline.
+ *
+ * Operating sample rate: 24 kHz (Phoenix's audio rate after the post-IFFT
+ * decimation chain in DSP.cpp). PSK31 baud is 31.25; we decimate to a
+ * working rate of 24000/96 = 250 sps (= 8x oversampling per symbol).
+ *
+ * Pipeline stages:
+ *   1. NCO mixer at psk31RxFreq -> shifts the audio carrier to baseband.
+ *      Out: complex baseband at 24 kHz.
+ *   2. Single-pole low-pass filter on each of I, Q (RC ~50 Hz cutoff).
+ *      Out: narrow-band complex baseband.
+ *   3. 96:1 decimator (counter-driven). Out: complex baseband at 250 sps.
+ *   4. Gardner symbol-clock recovery on the decimated stream. Tracks a
+ *      fractional symbol position mu in [0, T_symbol_samples). When mu
+ *      crosses, output one symbol and update the clock-error-tracking PI
+ *      loop.
+ *   5. DBPSK on consecutive symbols: |delta_phase| > PI/2 -> bit 0, else 1.
+ *   6. PSK31VaricodeDecoderPush() bit-by-bit -> ASCII chars.
+ *   7. Push chars to the text ring buffer.
+ * ============================================================ */
+
+#define PSK31_AUDIO_RATE_HZ      24000
+#define PSK31_DECIM              96
+#define PSK31_BASEBAND_RATE_HZ   (PSK31_AUDIO_RATE_HZ / PSK31_DECIM)  /* 250 */
+#define PSK31_SYMBOLS_PER_SEC    31.25f
+#define PSK31_SAMPLES_PER_SYMBOL (PSK31_BASEBAND_RATE_HZ / PSK31_SYMBOLS_PER_SEC) /* 8.0 */
+
+/* Public state */
+int psk31RxFreq = 1000;  /* default 1 kHz audio carrier */
+
+/* Module-private pipeline state */
+static float s_nco_phase = 0.0f;       /* NCO phase accumulator (radians) */
+static float s_lp_i = 0.0f;            /* low-pass state, I channel */
+static float s_lp_q = 0.0f;            /* low-pass state, Q channel */
+static int   s_decim_count = 0;        /* 0..PSK31_DECIM-1 */
+
+/* Gardner clock-recovery state. Buffer holds the last few decimated samples
+ * so we can compute Gardner's timing-error metric e = (early - late) * mid.
+ * We use a 3-tap window (early, mid, late) sliding across the ring. */
+#define PSK31_GARDNER_BUF_SIZE 16  /* > 2 * samples_per_symbol */
+static float s_gardner_i[PSK31_GARDNER_BUF_SIZE];
+static float s_gardner_q[PSK31_GARDNER_BUF_SIZE];
+static int   s_gardner_widx = 0;       /* write index into gardner_i/q */
+static float s_gardner_mu = 0.0f;      /* fractional symbol position [0, T) */
+static float s_gardner_loop_gain = 0.05f;  /* PI loop gain on timing error */
+
+/* DBPSK previous-symbol phase for the runtime decoder (separate from the
+ * primitive PSK31DBPSKDecode's s_last_phase). */
+static float s_dbpsk_last_phase = 0.0f;
+
+/* Decoded-text ring buffer */
+static char s_text_buf[PSK31_TEXT_BUFFER_SIZE];
+static int  s_text_head = 0;           /* next-write index */
+static int  s_text_count = 0;          /* total chars written, capped at buffer size */
+
+static void PushTextChar(char c) {
+    s_text_buf[s_text_head] = c;
+    s_text_head = (s_text_head + 1) % PSK31_TEXT_BUFFER_SIZE;
+    if (s_text_count < PSK31_TEXT_BUFFER_SIZE) s_text_count++;
+}
+
+void PSK31ClearText(void) {
+    s_text_head = 0;
+    s_text_count = 0;
+    s_text_buf[0] = '\0';
+}
+
+int PSK31GetText(char *out, int outMax) {
+    if (out == NULL || outMax <= 0) return 0;
+    int n = (s_text_count < outMax - 1) ? s_text_count : outMax - 1;
+    /* Linearise from oldest to newest. The oldest is at s_text_head when full,
+     * or at index 0 when not yet full. */
+    int start = (s_text_count < PSK31_TEXT_BUFFER_SIZE)
+                ? 0
+                : s_text_head;
+    for (int i = 0; i < n; i++) {
+        out[i] = s_text_buf[(start + i) % PSK31_TEXT_BUFFER_SIZE];
+    }
+    out[n] = '\0';
+    return n;
+}
+
+void ResetPSK31Pipeline(void) {
+    s_nco_phase = 0.0f;
+    s_lp_i = 0.0f;
+    s_lp_q = 0.0f;
+    s_decim_count = 0;
+    s_gardner_widx = 0;
+    s_gardner_mu = 0.0f;
+    s_dbpsk_last_phase = 0.0f;
+    /* Don't clear the text buffer here -- ChangePSK31RxFreq might be called
+     * mid-decode and we want recent text preserved. PSK31ClearText() is the
+     * separate operation to wipe text. */
+    /* Reset varicode shift register so we don't carry partial codeword bits
+     * across a freq change. */
+    ResetPSK31Decoder();
+}
+
+/* Forward decl of the pane-stale helper (defined elsewhere) -- declared as
+ * extern via MainBoard_Display.h above. We re-extern here to keep the
+ * function self-contained for readers. */
+extern struct Pane PaneSpectrum;
+
+void ChangePSK31RxFreq(int wheel) {
+    psk31RxFreq += wheel * 5;  /* 5 Hz step per encoder click */
+    if (psk31RxFreq < 200)  psk31RxFreq = 200;
+    if (psk31RxFreq > 2700) psk31RxFreq = 2700;
+    /* The new carrier means our NCO + filter state are stale; reset so the
+     * next sample mixes against a phase-aligned NCO. */
+    ResetPSK31Pipeline();
+    PaneSpectrum.stale = true;
+}
+
+/*
+ * Single-pole IIR low-pass filter:
+ *   y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
+ *
+ * For PSK31 we want a cutoff well above the symbol rate (31.25 Hz) but
+ * below half the carrier offset so we don't pull in adjacent signals. With
+ * alpha = 0.05 at 24 kHz, the -3 dB cutoff is approximately
+ *   fc ~= alpha * fs / (2 * pi) ~= 191 Hz
+ * which is wide enough to pass the PSK31 spectrum (occupies ~62 Hz) and
+ * narrow enough to reject most adjacent QSO-distance interference.
+ */
+#define PSK31_LP_ALPHA  0.05f
+
+/*
+ * Gardner timing-error metric:
+ *   e = (sample at mu + T/2) * (sample at mu - sample at mu + T)
+ * where T is one symbol period in samples.
+ *
+ * For 8 samples/symbol with mu in [0, 8), early = mu (current symbol point),
+ * mid = mu + 4, late = mu + 8 (the next symbol point). We compute e and use
+ * it to nudge mu's fractional advance.
+ *
+ * A successful decode produces |e| -> 0 and mu -> 0 (centered on symbols).
+ */
+static float gardner_error(float i_early, float q_early,
+                           float i_mid,   float q_mid,
+                           float i_late,  float q_late) {
+    /* Error metric uses real component only (BPSK is real-axis modulation
+     * after carrier alignment). */
+    return (i_late - i_early) * i_mid + (q_late - q_early) * q_mid;
+}
+
+void psk31Demod(DataBlock *data) {
+    if (data == NULL || data->N == 0) return;
+
+    const float dphase_per_sample =
+        2.0f * (float)PI * (float)psk31RxFreq / (float)PSK31_AUDIO_RATE_HZ;
+
+    for (unsigned i = 0; i < data->N; i++) {
+        /* --- 1. NCO mixer: bring carrier to baseband by multiplying by
+         * exp(-j * 2*pi*f*n/fs). New IQ at the mixer output. */
+        float c = cosf(s_nco_phase);
+        float s = sinf(s_nco_phase);
+        float audio_i = data->I[i];
+        float audio_q = data->Q[i];
+        float bb_i = audio_i * c + audio_q * s;
+        float bb_q = -audio_i * s + audio_q * c;
+
+        s_nco_phase += dphase_per_sample;
+        if (s_nco_phase > 2.0f * (float)PI) s_nco_phase -= 2.0f * (float)PI;
+
+        /* --- 2. Single-pole low-pass on each channel. */
+        s_lp_i = PSK31_LP_ALPHA * bb_i + (1.0f - PSK31_LP_ALPHA) * s_lp_i;
+        s_lp_q = PSK31_LP_ALPHA * bb_q + (1.0f - PSK31_LP_ALPHA) * s_lp_q;
+
+        /* --- 3. Decimator: emit one decimated sample every PSK31_DECIM input
+         * samples. */
+        s_decim_count++;
+        if (s_decim_count < PSK31_DECIM) continue;
+        s_decim_count = 0;
+
+        /* The decimated sample is the current low-pass output. */
+        float dec_i = s_lp_i;
+        float dec_q = s_lp_q;
+
+        /* --- 4. Gardner symbol-clock recovery. Push into ring; once we have
+         * enough samples (>= 2 symbol periods), check if mu has crossed a
+         * symbol boundary and emit a symbol. */
+        s_gardner_i[s_gardner_widx] = dec_i;
+        s_gardner_q[s_gardner_widx] = dec_q;
+        s_gardner_widx = (s_gardner_widx + 1) % PSK31_GARDNER_BUF_SIZE;
+
+        /* Advance fractional position by one decimated sample. */
+        s_gardner_mu += 1.0f;
+        if (s_gardner_mu < PSK31_SAMPLES_PER_SYMBOL) continue;
+
+        /* mu crossed a symbol boundary; emit one symbol and adjust clock. */
+        s_gardner_mu -= PSK31_SAMPLES_PER_SYMBOL;
+
+        /* Look back 2 symbols, 1 symbol, and 0 symbols (the current point).
+         * "Late" = current; "early" = 2 symbols back; "mid" = 1 symbol back. */
+        const int sps = (int)PSK31_SAMPLES_PER_SYMBOL;
+        int idx_late  = (s_gardner_widx - 1 + PSK31_GARDNER_BUF_SIZE) % PSK31_GARDNER_BUF_SIZE;
+        int idx_mid   = (s_gardner_widx - 1 - sps + PSK31_GARDNER_BUF_SIZE) % PSK31_GARDNER_BUF_SIZE;
+        int idx_early = (s_gardner_widx - 1 - 2*sps + PSK31_GARDNER_BUF_SIZE) % PSK31_GARDNER_BUF_SIZE;
+
+        float i_e = s_gardner_i[idx_early], q_e = s_gardner_q[idx_early];
+        float i_m = s_gardner_i[idx_mid],   q_m = s_gardner_q[idx_mid];
+        float i_l = s_gardner_i[idx_late],  q_l = s_gardner_q[idx_late];
+
+        float err = gardner_error(i_e, q_e, i_m, q_m, i_l, q_l);
+        /* Bound the error so a single bad sample doesn't slew mu wildly. */
+        if (err >  1.0f) err =  1.0f;
+        if (err < -1.0f) err = -1.0f;
+        s_gardner_mu += s_gardner_loop_gain * err;
+
+        /* --- 5. DBPSK on the symbol point (use mid-symbol since that's where
+         * Gardner is centered after convergence). */
+        float phase = ApproxAtan2(q_m, i_m);
+        float dphase = phase - s_dbpsk_last_phase;
+        while (dphase < -(float)PI)  dphase += 2.0f * (float)PI;
+        while (dphase >=  (float)PI) dphase -= 2.0f * (float)PI;
+        s_dbpsk_last_phase = phase;
+
+        uint8_t bit;
+        if (dphase > ((float)PI / 2.0f) || dphase < -((float)PI / 2.0f)) {
+            bit = 0;
+        } else {
+            bit = 1;
+        }
+
+        /* --- 6. Push the bit to the varicode decoder. On a complete codeword
+         * match it returns the ASCII char; otherwise 0. */
+        char ch = PSK31VaricodeDecoderPush(bit);
+        if (ch != 0) {
+            /* Filter out non-printable control chars except CR/LF. */
+            if (ch >= 32 || ch == '\n' || ch == '\r') {
+                PushTextChar(ch);
+                /* Pane needs repaint. */
+                PaneSpectrum.stale = true;
+            }
+        }
     }
 }

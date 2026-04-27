@@ -1351,6 +1351,15 @@ void InitFilterMask(float32_t *FIR_filter_mask, ReceiveFilterConfig *RXfilters) 
                 low_Hz  =   200;
                 high_Hz =  3000;
                 break;
+            case PSK31:
+                // PSK31 audio: wide passband matches FT8's reasoning. The
+                // PSK31 decoder pipeline does its own narrow filtering after
+                // NCO down-mix to baseband (~50 Hz wide), so the front-end
+                // FIR can stay wide enough to let the operator move the audio
+                // carrier within the SSB passband.
+                low_Hz  =   200;
+                high_Hz =  3000;
+                break;
         }
     }
     CalcCplxFIRCoeffs(FIR_Coef_I, FIR_Coef_Q, RXfilters->m_NumTaps, 

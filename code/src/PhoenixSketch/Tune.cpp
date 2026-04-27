@@ -69,7 +69,8 @@ void AdjustFineTune(int32_t filter_change){
         case IQ:
         case DCF77:
         case NFM:
-        case FT8_INTERNAL: {
+        case FT8_INTERNAL:
+        case PSK31: {
             /* Block-scoped local: required so subsequent case labels (if any
              * are added later) don't "jump over the initialization" of edge_Hz.
              * NFM and FT8_INTERNAL share the symmetric-edge pattern; FT8 in

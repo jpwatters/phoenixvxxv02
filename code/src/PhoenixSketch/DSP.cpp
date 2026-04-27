@@ -703,6 +703,11 @@ void Demodulate(DataBlock *data, ReceiveFilterConfig *RXfilters){
         // runs at 15-second slot boundaries from RunFT8DecoderLoop().
         ft8InternalDemod(data);
         break;
+      case PSK31:
+        // Phoenix-native PSK31 decoder. NCO mix -> low-pass -> decimate ->
+        // Gardner clock recovery -> DBPSK -> varicode -> text ring buffer.
+        psk31Demod(data);
+        break;
       default:
         break;
     }
