@@ -1,0 +1,411 @@
+#include "SDT.h"
+
+#ifdef FAST_TUNE
+// The fast tune parameters
+static uint64_t MS_temp, FT_delay, FT_last_time;
+static bool FT_ON = false;
+const uint64_t FT_cancel_ms = 500;  // time between steps above which FT is cancelled
+const uint64_t FT_on_ms = 100;      // time between FTsteps below which increases the step size
+const int32_t FT_trig = 4;          // number of short steps to trigger fast tune,
+const int FT_step = 1000;           // Hz step in Fast Tune
+static int64_t last_FT_step_size = 1;
+static uint32_t FT_step_counter = 0;
+#endif
+
+/**
+ * Adjust the fine tune frequency (2nd stage software mixer)
+ * 
+ * @param filter_change The positive or negative increment to the filter setting
+ */
+void AdjustFineTune(int32_t filter_change){
+    #ifdef FAST_TUNE
+    MS_temp = millis();
+    FT_delay = MS_temp - FT_last_time;
+    FT_last_time = MS_temp;
+    if (FT_ON) {  // Check if FT should be cancelled (FT_delay>=FT_cancel_ms)
+        if (FT_delay >= FT_cancel_ms) {
+            FT_ON = false;
+            ED.stepFineTune = last_FT_step_size;
+        }
+    } else {  //  FT is off so check for short delays
+        if (FT_delay <= FT_on_ms) {
+            FT_step_counter += 1;
+        }
+        if (FT_step_counter >= FT_trig) {
+            last_FT_step_size = ED.stepFineTune;
+            ED.stepFineTune = FT_step;
+            FT_step_counter = 0;
+            FT_ON = true;
+        }
+    }
+    #endif  // FAST_TUNE
+
+    ED.fineTuneFreq_Hz[ED.activeVFO] += ED.stepFineTune * filter_change;
+    //Debug("Fine tune pre: " + String(ED.fineTuneFreq_Hz[ED.activeVFO]));
+    // If the zoom level is 0, then the valid range of fine tune window is between
+    // -samplerate/2 and +samplerate/2. 
+    int32_t lower_limit = -(int32_t)(SR[SampleRate].rate)/2;
+    int32_t upper_limit = (int32_t)(SR[SampleRate].rate)/2;
+    if (ED.spectrum_zoom != 0) {
+        // The fine tune frequency must stay within the visible tuning window, which
+        // is determined by the zoom level. The visible window is determined by shifting
+        // the spectrum by +48 kHz so the center is at EEPROMData.centerFreq_Hz - 48 kHz, 
+        // then zooming in around the new center frequency.
+        uint32_t visible_bandwidth = SR[SampleRate].rate / (1 << ED.spectrum_zoom);
+        lower_limit = -(int32_t)visible_bandwidth/2;
+        upper_limit = +(int32_t)visible_bandwidth/2;
+        //Debug("Visible bandwidth: " + String(visible_bandwidth));
+    }
+    // Don't approach within the filter bandwidth of the band edge
+    switch (ED.modulation[ED.activeVFO]){
+        case LSB:
+            lower_limit -= bands[ED.currentBand[ED.activeVFO]].FLoCut_Hz; // FLoCut_Hz is negative
+            break;
+        case USB:
+            upper_limit -= bands[ED.currentBand[ED.activeVFO]].FHiCut_Hz;
+            break;
+        case AM:
+        case SAM:
+        case IQ:
+        case DCF77:
+        case NFM:
+        case FT8_INTERNAL:
+        case PSK31: {
+            /* Block-scoped local: required so subsequent case labels (if any
+             * are added later) don't "jump over the initialization" of edge_Hz.
+             * NFM (12.5 kHz channel, +-2.5 kHz peak dev., ~3 kHz audio LPF,
+             * m ~= 0.83) and FT8_INTERNAL share the symmetric-edge pattern;
+             * FT8 in particular doesn't use fine-tune via this path (the
+             * encoder is repurposed to ChangeFT8RxFreq), but other callers
+             * may still hit this and need sensible limits. */
+            #define MAXABS(a, b) ((abs(a)) > (abs(b)) ? (abs(a)) : (abs(b)))
+            int32_t edge_Hz = MAXABS(bands[ED.currentBand[ED.activeVFO]].FHiCut_Hz,
+                                    bands[ED.currentBand[ED.activeVFO]].FLoCut_Hz);
+            lower_limit += edge_Hz;
+            upper_limit -= edge_Hz;
+            break;
+        }
+        case FM_WIDE: {
+            /* Wide-band FM uses a fixed +-10 kHz FIR passband (Carson's rule
+             * for +-5 kHz dev. + ~3 kHz audio in a 25 kHz channel), so the
+             * fine-tune edge limit must match that fixed mask, not the
+             * per-band SSB FHiCut/FLoCut defaults. Block-scoped to silence
+             * -Wswitch and to keep the case-jumps-over-init guard intact. */
+            int32_t edge_Hz = 10000;
+            lower_limit += edge_Hz;
+            upper_limit -= edge_Hz;
+            break;
+        }
+    }
+    //Debug("Upper limit: " + String(upper_limit));
+    //Debug("Lower limit: " + String(lower_limit));
+    if (-ED.fineTuneFreq_Hz[ED.activeVFO] > upper_limit) 
+        ED.fineTuneFreq_Hz[ED.activeVFO] = -upper_limit;
+    if (-ED.fineTuneFreq_Hz[ED.activeVFO] < lower_limit) 
+        ED.fineTuneFreq_Hz[ED.activeVFO] = -lower_limit;
+    //Debug("Fine tune post: " + String(ED.fineTuneFreq_Hz[ED.activeVFO]));
+}
+
+/**
+ * Return the effective transmit/receive frequency, which is a combination of the center
+ * frequency, the fine tune frequency, and the sample rate.
+ * 
+ * @return The effective transmit/receive frequency in units of Hz * 100
+ */
+int64_t GetTXRXFreq_dHz(void){
+    int64_t val = 100*(ED.centerFreq_Hz[ED.activeVFO] - ED.fineTuneFreq_Hz[ED.activeVFO] - SR[SampleRate].rate/4);
+    return val;
+}
+
+/**
+ * Return the effective transmit/receive frequency, which is a combination of the center
+ * frequency, the fine tune frequency, and the sample rate, for a particular VFO.
+ * 
+ * @return The effective transmit/receive frequency in units of Hz
+ */
+int64_t GetTXRXFreq(uint8_t vfo){
+    int64_t val = (ED.centerFreq_Hz[vfo] - ED.fineTuneFreq_Hz[vfo] - SR[SampleRate].rate/4);
+    return val;
+}
+
+/**
+ * Return the CW transmit frequency, which is a combination of the RX/TX frequency and the
+ * CW tone offset.
+ * 
+ * @return The CW tone transmit frequency in units of Hz * 100
+ */
+int64_t GetCWTXFreq_dHz(void){
+    int64_t txrx = GetTXRXFreq_dHz();
+    int64_t offset = (int64_t)(100*CWToneOffsetsHz[ED.CWToneIndex]);
+    if (bands[ED.currentBand[ED.activeVFO]].mode == LSB) {
+        return txrx - offset;
+    } else {
+        return txrx + offset;
+    }
+}
+
+/**
+ * Set the fine tune frequency to 0 Hz and change the center frequency such that 
+ * the RXTX frequency remains the same.
+ */
+void ResetTuning(void){
+    ED.centerFreq_Hz[ED.activeVFO] = ED.centerFreq_Hz[ED.activeVFO] - ED.fineTuneFreq_Hz[ED.activeVFO];
+    ED.fineTuneFreq_Hz[ED.activeVFO] = 0.0;
+    return;
+}
+
+/**
+ * Determine which amateur radio band a given frequency belongs to.
+ * Searches through all defined bands to find which one contains the frequency.
+ *
+ * @param freq Frequency in Hz
+ * @return Band index (FIRST_BAND to LAST_BAND) if found, or -1 if frequency is not within any defined band
+ */
+int8_t GetBand(int64_t freq){
+    for(uint8_t i = FIRST_BAND; i <= LAST_BAND; i++){
+        if(freq >= bands[i].fBandLow_Hz && freq <= bands[i].fBandHigh_Hz){
+            return i;
+        }
+    }
+    return -1; // Frequency not within one of the defined ham bands
+}
+
+/*
+ * The output power of a radio is well-fit by a hyperbolic tan function:
+ *    Pout ​= Psat tanh( Psat*​G / Pin )
+ * Where Psat is the power at saturation and G parameterizes the power at which
+ * the radio starts to saturate.
+ * 
+ * A more convenient way for us to write this is based on the attenuation setting:
+ *    Pout ​= Psat tanh( k 10^{-A/10}​ )
+ */
+
+// Model function
+float32_t attenToPower_mW(float32_t att_dB, float32_t P_sat_mW, float32_t k) {
+    if (att_dB < 0){
+        Debug("Invalid negative attenuation provided to attenToPower_mW!");
+        return 0.0;
+    }
+    if (P_sat_mW < 0){
+        Debug("Invalid negative P_sat_mW provided to attenToPower_mW!");
+        return 0.0;
+    }
+    return P_sat_mW * tanh(k * powf(10.0f, -att_dB / 10.0f));
+}
+
+float32_t powerToAtten_dB(float32_t power_mW, float32_t P_sat_mW, float32_t k) {
+    if (power_mW >= P_sat_mW)
+        return 0.0;
+
+    float32_t atten = -10.0*log10f((1.0/k)*atanhf(power_mW/P_sat_mW));
+
+    // Clamp attenuation to valid range [0, 31.5] dB
+    if (atten < 0.0)
+        return 0.0;
+    if (atten > 31.5)
+        return 31.5;
+
+    return atten;
+}
+
+/**
+ * Return the calculated output power given an attenuation setting and PA selection. 
+ * The output power is given by the equation:
+ *   Pout [W] ​= Psat [mW] tanh( k 10^{-Attenuation [dB]/10}​ ) / 1000
+ * This function is only used in testing and only works for CW mode
+ * 
+ * @param atten Attenuation setting in dB
+ * @param PAsel 0 for 20W, 1 for 100W
+ * @return Output power in mW
+ */
+float32_t CalculateCWPowerLevel(float32_t atten_dB, int8_t PAsel){
+    if (atten_dB < 0){
+        Debug("Atten must be positive!");
+        return 0;
+    }
+    if (atten_dB > 31.5){
+        Debug("Atten must be <31.5!");
+        return 0;
+    }
+    float32_t Psat,k;
+    if (PAsel == 0){
+        Psat = ED.PowerCal_20W_Psat_mW[ED.currentBand[ED.activeVFO]];
+        k = ED.PowerCal_20W_kindex[ED.currentBand[ED.activeVFO]];
+    } else {
+        Psat = ED.PowerCal_100W_Psat_mW[ED.currentBand[ED.activeVFO]];
+        k = ED.PowerCal_100W_kindex[ED.currentBand[ED.activeVFO]];
+    }
+    float32_t P_mW = attenToPower_mW(atten_dB,Psat,k);
+    return P_mW;
+}
+
+/**
+ * Return the attenuation setting necessary to produce the requested output power 
+ * in CW mode. The attenuation is given by the equation:
+ *    Atten [dB] ​= -10*log10( 1/k * arctanh( ​Power [W]/(Psat [mW] *1000) ) )
+ * 
+ * @param Power_W Desired power in W
+ * @param *PAsel Pointer to PA setting, we set this to 1 if 100W amp is needed
+ * @return Attenuation setting in dB (float32_t)
+ */
+float32_t CalculateCWAttenuation(float32_t Power_W, bool *PAsel){
+    if (Power_W < 0){
+        Debug("Power must be positive!");
+        return 0;
+    }
+    if (Power_W > 100){
+        Debug("Power must be <100!");
+        return 0;
+    }
+    if (Power_W >= ED.PowerCal_20W_to_100W_threshold_W){
+        *PAsel = true;
+    } else {
+        *PAsel = false;
+    }
+    float32_t Psat,k;
+    if (*PAsel){
+        Psat = ED.PowerCal_100W_Psat_mW[ED.currentBand[ED.activeVFO]];
+        k = ED.PowerCal_100W_kindex[ED.currentBand[ED.activeVFO]];
+    } else {
+        Psat = ED.PowerCal_20W_Psat_mW[ED.currentBand[ED.activeVFO]];
+        k = ED.PowerCal_20W_kindex[ED.currentBand[ED.activeVFO]];
+    }
+    return powerToAtten_dB(Power_W*1000.0,Psat,k);
+}
+
+/**
+ * Return the gain required to produce the requested output power in SSB mode.
+ * @param power_W The desired setpoint in W
+ * @param *PAsel Pointer to PA setting, we set this to 1 if 100W amp is needed
+ * @return The gain in dB
+ */
+float32_t CalculateSSBTXGain(float32_t Power_W, bool *PAsel){
+    if (Power_W < 0){
+        Debug("Power must be positive!");
+        return 0;
+    }
+    if (Power_W > 100){
+        Debug("Power must be <100!");
+        return 0;
+    }
+    if (Power_W >= ED.PowerCal_20W_to_100W_threshold_W){
+        *PAsel = true;
+    } else {
+        *PAsel = false;
+    }
+    float32_t gain_dB;
+    if (ED.PA100Wactive)
+        gain_dB = 10.0*log10f(Power_W / SSB_100W_CAL_POWER_POINT_W);
+    else
+        gain_dB = 10.0*log10f(Power_W / SSB_20W_CAL_POWER_POINT_W);
+    return gain_dB;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Functions used to fit hyperbolic tan function to saturation curve
+// Model: P_out = P_sat * tanh(k * 10^(-Att/10))
+///////////////////////////////////////////////////////////////////////////////
+
+// Gauss-Newton least squares fit
+FitResult fitTanhModel(float32_t* att, float32_t* pout, int32_t n, 
+                       float32_t P_sat_init, float32_t k_init,
+                       int32_t max_iter = 100, float32_t tol = 1e-6) {
+    
+    float32_t P_sat = P_sat_init;
+    float32_t k = k_init;
+    
+    float32_t J[2];      // Jacobian row
+    float32_t JtJ[4];    // 2x2 normal matrix
+    float32_t Jtr[2];    // J^T * residual
+    float32_t delta[2];  // Parameter update
+    
+    int32_t iter;
+    for (iter = 0; iter < max_iter; iter++) {
+        // Reset accumulators
+        memset(JtJ, 0, sizeof(JtJ));
+        memset(Jtr, 0, sizeof(Jtr));
+        
+        for (int32_t i = 0; i < n; i++) {
+            float32_t x = powf(10.0f, -att[i] / 10.0f);
+            float32_t t = tanh(k * x);
+            float32_t sech2 = 1.0f - t * t;  // sech^2 = 1 - tanh^2
+            
+            float32_t y_pred = P_sat * t;
+            float32_t residual = pout[i] - y_pred;
+            
+            // Partial derivatives
+            J[0] = t;              // dF/dP_sat
+            J[1] = P_sat * sech2 * x;  // dF/dk
+            
+            // Accumulate J^T * J
+            JtJ[0] += J[0] * J[0];
+            JtJ[1] += J[0] * J[1];
+            JtJ[2] += J[1] * J[0];
+            JtJ[3] += J[1] * J[1];
+            
+            // Accumulate J^T * r
+            Jtr[0] += J[0] * residual;
+            Jtr[1] += J[1] * residual;
+        }
+        
+        // Solve 2x2 system: JtJ * delta = Jtr
+        float32_t det = JtJ[0] * JtJ[3] - JtJ[1] * JtJ[2];
+        if (fabsf(det) < 1e-10f) break;
+        
+        delta[0] = (JtJ[3] * Jtr[0] - JtJ[1] * Jtr[1]) / det;
+        delta[1] = (JtJ[0] * Jtr[1] - JtJ[2] * Jtr[0]) / det;
+        
+        // Update parameters
+        P_sat += delta[0];
+        k += delta[1];
+        
+        // Keep parameters positive
+        if (P_sat < 1.0f) P_sat = 1.0f;
+        if (k < 0.01f) k = 0.01f;
+        
+        // Check convergence
+        if (fabsf(delta[0]) < tol && fabsf(delta[1]) < tol) break;
+    }
+    
+    // Calculate RMS error
+    float32_t sse = 0;
+    for (int32_t i = 0; i < n; i++) {
+        float32_t err = pout[i] - attenToPower_mW(att[i], P_sat, k);
+        sse += err * err;
+    }
+    
+    FitResult result;
+    result.P_sat = P_sat;
+    result.k = k;
+    result.iterations = iter;
+    result.rms_error = sqrtf(sse / n);
+    
+    return result;
+}
+
+FitResult FitPowerCurve(float32_t *att_dB, float32_t *pout_mW, int32_t Npoints,
+                    float32_t P_sat_init = 15000.0f, float32_t k_init = 6.0f) {    
+    // Initial guesses for P_sat_init and k_init are close for 20W amp case
+    char buff[100];
+    Serial.println("Fit to data points:");
+    Serial.println("| Att [dB] | Power [mW] |");
+    Serial.println("|----------|------------|");
+    for (int32_t k=0; k<Npoints; k++){
+        sprintf(buff,  "| %2.1f     | %3.2f |",att_dB[k],pout_mW[k]);
+        Serial.println(buff);
+    }
+
+    // Perform fit
+    FitResult fit = fitTanhModel(att_dB, pout_mW, Npoints, P_sat_init, k_init);
+    
+    Serial.println("Power Curve Fit Results:");
+    Serial.println("| Parameter  | Value |");
+    Serial.println("|------------|-------|");
+    Serial.print(  "| P_sat      | "); Serial.print(fit.P_sat); Serial.println(" mW |");
+    Serial.print(  "| P_sat      | "); Serial.print(10.0f * log10f(fit.P_sat)); Serial.println(" dBm |");
+    Serial.print(  "| k          | "); Serial.print(fit.k); Serial.println(" |");
+    Serial.print(  "| Iterations | "); Serial.print(fit.iterations); Serial.println(" |");
+    Serial.print(  "| RMS Error  | "); Serial.print(fit.rms_error); Serial.println(" mW |");
+
+    return fit;
+}

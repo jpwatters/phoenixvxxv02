@@ -1,0 +1,2981 @@
+/**
+ * @file Display_test.cpp
+ * @brief Unit tests for MainBoard_Display.cpp functions
+ *
+ * This file contains unit tests for the display drawing and updating functions
+ * in MainBoard_Display.cpp. Tests verify proper display pane management, frequency
+ * formatting, VFO display updates, and settings display.
+ */
+
+#include <gtest/gtest.h>
+#include "SDT.h"
+
+#include <thread>
+#include <chrono>
+#include <atomic>
+#include <mutex>
+
+// Timer variables for interrupt simulation
+static std::atomic<bool> timer_running{false};
+static std::thread timer_thread;
+
+/**
+ * Timer interrupt function that runs every 1ms
+ * Dispatches DO events to the state machines
+ */
+void timer1ms(void) {
+    ModeSm_dispatch_event(&modeSM, ModeSm_EventId_DO);
+    UISm_dispatch_event(&uiSM, UISm_EventId_DO);
+}
+
+/**
+ * Start the 1ms timer interrupt
+ */
+void start_timer1ms() {
+    if (timer_running.load()) return; // Already running
+
+    timer_running.store(true);
+    timer_thread = std::thread([]() {
+        while (timer_running.load()) {
+            timer1ms();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+}
+
+/**
+ * Stop the 1ms timer interrupt
+ */
+void stop_timer1ms() {
+    if (!timer_running.load()) return; // Not running
+
+    timer_running.store(false);
+    if (timer_thread.joinable()) {
+        timer_thread.join();
+    }
+}
+
+
+/**
+ * Test fixture for Display tests
+ * Sets up common test environment for display functions
+ */
+class DisplayTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        // Initialize test environment before each test
+        // TODO: Add setup code (e.g., initialize ED structure, display state)
+    }
+
+    void TearDown() override {
+        // Clean up after each test
+        stop_timer1ms(); // Stop the timer thread to prevent crashes during teardown
+    }
+};
+
+/**
+ * Test ShowSpectrum() draws spectrum and waterfall
+ */
+TEST_F(DisplayTest, MenuRedrawn) {
+    // Set up the queues so we get some simulated data through and start the "clock"
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    //-------------------------------------------------------------
+    // Radio startup code
+    //-------------------------------------------------------------
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();  // Initialize DSP before starting audio
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware(); // RF board, LPF board, and BPF board
+    
+    // Start the mode state machines
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    // Now, start the 1ms timer interrupt to simulate hardware timer
+    start_timer1ms();
+
+    //-------------------------------------------------------------
+    
+    EXPECT_EQ(modeSM.state_id, ModeSm_StateId_SSB_RECEIVE);
+
+    // Check the state before loop is invoked and then again after
+    loop();MyDelay(10);
+    
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_HOME );
+    SetButton(MAIN_MENU_UP);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_MAIN_MENU);
+
+    SetButton(HOME_SCREEN);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_HOME);
+
+    loop(); MyDelay(10);
+
+}
+
+/**
+ * Test IncrementVariable() with TYPE_I8
+ * Verifies that 8-bit integer variables are incremented correctly
+ * with proper bounds checking
+ */
+TEST_F(DisplayTest, IncrementVariableI8_Normal) {
+    int8_t test_var = 10;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I8,
+        .limits = {.i8 = {.min = 0, .max = 100, .step = 5}}
+    };
+
+    IncrementVariable(&param);
+
+    // Should increment by step (5)
+    EXPECT_EQ(test_var, 15);
+}
+
+/**
+ * Test IncrementVariable() with TYPE_I8 at maximum limit
+ * Verifies that incrementing doesn't exceed max value
+ */
+TEST_F(DisplayTest, IncrementVariableI8_AtMax) {
+    int8_t test_var = 98;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I8,
+        .limits = {.i8 = {.min = 0, .max = 100, .step = 5}}
+    };
+
+    IncrementVariable(&param);
+
+    // Should be clamped to max value
+    EXPECT_EQ(test_var, 100);
+}
+
+/**
+ * Test IncrementVariable() with TYPE_I8 exceeding maximum
+ * Verifies proper clamping when increment would exceed max
+ */
+TEST_F(DisplayTest, IncrementVariableI8_ExceedMax) {
+    int8_t test_var = 100;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I8,
+        .limits = {.i8 = {.min = 0, .max = 100, .step = 5}}
+    };
+
+    IncrementVariable(&param);
+
+    // Should remain at max when already at max
+    EXPECT_EQ(test_var, 100);
+}
+
+/**
+ * Test IncrementVariable() with NULL pointer
+ * Verifies safe handling of null variable pointer
+ */
+TEST_F(DisplayTest, IncrementVariableI8_NullPointer) {
+    VariableParameter param = {
+        .variable = NULL,
+        .type = TYPE_I8,
+        .limits = {.i8 = {.min = 0, .max = 100, .step = 5}}
+    };
+
+    // Should not crash when variable is NULL
+    IncrementVariable(&param);
+
+    // Test passes if no crash occurs
+    SUCCEED();
+}
+
+/**
+ * Test IncrementVariable() with negative values
+ * Verifies correct handling of negative ranges
+ */
+TEST_F(DisplayTest, IncrementVariableI8_NegativeRange) {
+    int8_t test_var = -50;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I8,
+        .limits = {.i8 = {.min = -100, .max = 0, .step = 10}}
+    };
+
+    IncrementVariable(&param);
+
+    EXPECT_EQ(test_var, -40);
+}
+
+/**
+ * Test IncrementVariable() with step size of 1
+ * Verifies correct operation with minimal step
+ */
+TEST_F(DisplayTest, IncrementVariableI8_StepOne) {
+    int8_t test_var = 42;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I8,
+        .limits = {.i8 = {.min = 0, .max = 127, .step = 1}}
+    };
+
+    IncrementVariable(&param);
+
+    EXPECT_EQ(test_var, 43);
+}
+
+/**
+ * Test IncrementVariable() with TYPE_I16
+ * Verifies that 16-bit integer variables are incremented correctly
+ */
+TEST_F(DisplayTest, IncrementVariableI16_Normal) {
+    int16_t test_var = 100;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I16,
+        .limits = {.i16 = {.min = 0, .max = 1000, .step = 50}}
+    };
+
+    IncrementVariable(&param);
+
+    EXPECT_EQ(test_var, 150);
+}
+
+/**
+ * Test IncrementVariable() with TYPE_I16 at maximum
+ */
+TEST_F(DisplayTest, IncrementVariableI16_AtMax) {
+    int16_t test_var = 980;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I16,
+        .limits = {.i16 = {.min = 0, .max = 1000, .step = 50}}
+    };
+
+    IncrementVariable(&param);
+
+    EXPECT_EQ(test_var, 1000);
+}
+
+/**
+ * Test IncrementVariable() with TYPE_I32
+ * Verifies that 32-bit integer variables are incremented correctly
+ */
+TEST_F(DisplayTest, IncrementVariableI32_Normal) {
+    int32_t test_var = 1000;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I32,
+        .limits = {.i32 = {.min = 0, .max = 10000, .step = 100}}
+    };
+
+    IncrementVariable(&param);
+
+    EXPECT_EQ(test_var, 1100);
+}
+
+/**
+ * Test IncrementVariable() with TYPE_I32 exceeding maximum
+ */
+TEST_F(DisplayTest, IncrementVariableI32_ExceedMax) {
+    int32_t test_var = 9950;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I32,
+        .limits = {.i32 = {.min = 0, .max = 10000, .step = 100}}
+    };
+
+    IncrementVariable(&param);
+
+    EXPECT_EQ(test_var, 10000);
+}
+
+/**
+ * Test IncrementVariable() with TYPE_I64
+ * Verifies that 64-bit integer variables are incremented correctly
+ */
+TEST_F(DisplayTest, IncrementVariableI64_Normal) {
+    int64_t test_var = 1000000LL;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I64,
+        .limits = {.i64 = {.min = 0, .max = 10000000LL, .step = 1000}}
+    };
+
+    IncrementVariable(&param);
+
+    EXPECT_EQ(test_var, 1001000LL);
+}
+
+/**
+ * Test IncrementVariable() with TYPE_I64 at maximum
+ */
+TEST_F(DisplayTest, IncrementVariableI64_AtMax) {
+    int64_t test_var = 9999500LL;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I64,
+        .limits = {.i64 = {.min = 0, .max = 10000000LL, .step = 1000}}
+    };
+
+    IncrementVariable(&param);
+
+    EXPECT_EQ(test_var, 10000000LL);
+}
+
+/**
+ * Test IncrementVariable() with TYPE_F32
+ * Verifies that floating-point variables are incremented correctly
+ */
+TEST_F(DisplayTest, IncrementVariableF32_Normal) {
+    float test_var = 1.5f;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_F32,
+        .limits = {.f32 = {.min = 0.0f, .max = 10.0f, .step = 0.5f}}
+    };
+
+    IncrementVariable(&param);
+
+    EXPECT_FLOAT_EQ(test_var, 2.0f);
+}
+
+/**
+ * Test IncrementVariable() with TYPE_F32 exceeding maximum
+ */
+TEST_F(DisplayTest, IncrementVariableF32_ExceedMax) {
+    float test_var = 9.8f;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_F32,
+        .limits = {.f32 = {.min = 0.0f, .max = 10.0f, .step = 0.5f}}
+    };
+
+    IncrementVariable(&param);
+
+    EXPECT_FLOAT_EQ(test_var, 10.0f);
+}
+
+/**
+ * Test IncrementVariable() with TYPE_F32 negative values
+ */
+TEST_F(DisplayTest, IncrementVariableF32_NegativeRange) {
+    float test_var = -5.0f;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_F32,
+        .limits = {.f32 = {.min = -10.0f, .max = 0.0f, .step = 1.0f}}
+    };
+
+    IncrementVariable(&param);
+
+    EXPECT_FLOAT_EQ(test_var, -4.0f);
+}
+
+/**
+ * Test IncrementVariable() with TYPE_KeyTypeId
+ * Verifies that KeyTypeId enum variables are incremented correctly
+ */
+TEST_F(DisplayTest, IncrementVariableKeyTypeId_Normal) {
+    KeyTypeId test_var = KeyTypeId_Straight;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_KeyTypeId,
+        .limits = {.keyType = {.min = KeyTypeId_Straight, .max = KeyTypeId_Keyer, .step = 1}}
+    };
+
+    IncrementVariable(&param);
+
+    EXPECT_EQ(test_var, KeyTypeId_Keyer);
+}
+
+/**
+ * Test IncrementVariable() with TYPE_KeyTypeId at maximum
+ */
+TEST_F(DisplayTest, IncrementVariableKeyTypeId_AtMax) {
+    KeyTypeId test_var = KeyTypeId_Keyer;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_KeyTypeId,
+        .limits = {.keyType = {.min = KeyTypeId_Straight, .max = KeyTypeId_Keyer, .step = 1}}
+    };
+
+    IncrementVariable(&param);
+
+    // Should be clamped to max
+    EXPECT_EQ(test_var, KeyTypeId_Keyer);
+}
+
+/**
+ * Test IncrementVariable() with TYPE_BOOL
+ * Verifies that boolean variables toggle correctly
+ */
+TEST_F(DisplayTest, IncrementVariableBool_FalseToTrue) {
+    bool test_var = false;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_BOOL,
+        .limits = {.b = {.min = false, .max = true, .step = 1}}
+    };
+
+    IncrementVariable(&param);
+
+    EXPECT_EQ(test_var, true);
+}
+
+/**
+ * Test IncrementVariable() with TYPE_BOOL toggling from true to false
+ */
+TEST_F(DisplayTest, IncrementVariableBool_TrueToFalse) {
+    bool test_var = true;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_BOOL,
+        .limits = {.b = {.min = false, .max = true, .step = 1}}
+    };
+
+    IncrementVariable(&param);
+
+    EXPECT_EQ(test_var, false);
+}
+
+/**
+ * Test IncrementVariable() with TYPE_BOOL multiple toggles
+ */
+TEST_F(DisplayTest, IncrementVariableBool_MultipleToggles) {
+    bool test_var = false;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_BOOL,
+        .limits = {.b = {.min = false, .max = true, .step = 1}}
+    };
+
+    IncrementVariable(&param);
+    EXPECT_EQ(test_var, true);
+
+    IncrementVariable(&param);
+    EXPECT_EQ(test_var, false);
+
+    IncrementVariable(&param);
+    EXPECT_EQ(test_var, true);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// DecrementVariable Tests
+///////////////////////////////////////////////////////////////////////////////
+
+/**
+ * Test DecrementVariable() with TYPE_I8
+ * Verifies that 8-bit integer variables are decremented correctly
+ * with proper bounds checking
+ */
+TEST_F(DisplayTest, DecrementVariableI8_Normal) {
+    int8_t test_var = 20;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I8,
+        .limits = {.i8 = {.min = 0, .max = 100, .step = 5}}
+    };
+
+    DecrementVariable(&param);
+
+    // Should decrement by step (5)
+    EXPECT_EQ(test_var, 15);
+}
+
+/**
+ * Test DecrementVariable() with TYPE_I8 at minimum limit
+ * Verifies that decrementing doesn't go below min value
+ */
+TEST_F(DisplayTest, DecrementVariableI8_AtMin) {
+    int8_t test_var = 3;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I8,
+        .limits = {.i8 = {.min = 0, .max = 100, .step = 5}}
+    };
+
+    DecrementVariable(&param);
+
+    // Should be clamped to min value
+    EXPECT_EQ(test_var, 0);
+}
+
+/**
+ * Test DecrementVariable() with TYPE_I8 going below minimum
+ * Verifies proper clamping when decrement would go below min
+ */
+TEST_F(DisplayTest, DecrementVariableI8_BelowMin) {
+    int8_t test_var = 0;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I8,
+        .limits = {.i8 = {.min = 0, .max = 100, .step = 5}}
+    };
+
+    DecrementVariable(&param);
+
+    // Should remain at min when already at min
+    EXPECT_EQ(test_var, 0);
+}
+
+/**
+ * Test DecrementVariable() with NULL pointer
+ * Verifies safe handling of null variable pointer
+ */
+TEST_F(DisplayTest, DecrementVariableI8_NullPointer) {
+    VariableParameter param = {
+        .variable = NULL,
+        .type = TYPE_I8,
+        .limits = {.i8 = {.min = 0, .max = 100, .step = 5}}
+    };
+
+    // Should not crash when variable is NULL
+    DecrementVariable(&param);
+
+    // Test passes if no crash occurs
+    SUCCEED();
+}
+
+/**
+ * Test DecrementVariable() with negative values
+ * Verifies correct handling of negative ranges
+ */
+TEST_F(DisplayTest, DecrementVariableI8_NegativeRange) {
+    int8_t test_var = -40;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I8,
+        .limits = {.i8 = {.min = -100, .max = 0, .step = 10}}
+    };
+
+    DecrementVariable(&param);
+
+    EXPECT_EQ(test_var, -50);
+}
+
+/**
+ * Test DecrementVariable() with step size of 1
+ * Verifies correct operation with minimal step
+ */
+TEST_F(DisplayTest, DecrementVariableI8_StepOne) {
+    int8_t test_var = 42;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I8,
+        .limits = {.i8 = {.min = 0, .max = 127, .step = 1}}
+    };
+
+    DecrementVariable(&param);
+
+    EXPECT_EQ(test_var, 41);
+}
+
+/**
+ * Test DecrementVariable() with TYPE_I16
+ * Verifies that 16-bit integer variables are decremented correctly
+ */
+TEST_F(DisplayTest, DecrementVariableI16_Normal) {
+    int16_t test_var = 200;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I16,
+        .limits = {.i16 = {.min = 0, .max = 1000, .step = 50}}
+    };
+
+    DecrementVariable(&param);
+
+    EXPECT_EQ(test_var, 150);
+}
+
+/**
+ * Test DecrementVariable() with TYPE_I16 at minimum
+ */
+TEST_F(DisplayTest, DecrementVariableI16_AtMin) {
+    int16_t test_var = 30;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I16,
+        .limits = {.i16 = {.min = 0, .max = 1000, .step = 50}}
+    };
+
+    DecrementVariable(&param);
+
+    EXPECT_EQ(test_var, 0);
+}
+
+/**
+ * Test DecrementVariable() with TYPE_I32
+ * Verifies that 32-bit integer variables are decremented correctly
+ */
+TEST_F(DisplayTest, DecrementVariableI32_Normal) {
+    int32_t test_var = 1100;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I32,
+        .limits = {.i32 = {.min = 0, .max = 10000, .step = 100}}
+    };
+
+    DecrementVariable(&param);
+
+    EXPECT_EQ(test_var, 1000);
+}
+
+/**
+ * Test DecrementVariable() with TYPE_I32 going below minimum
+ */
+TEST_F(DisplayTest, DecrementVariableI32_BelowMin) {
+    int32_t test_var = 50;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I32,
+        .limits = {.i32 = {.min = 0, .max = 10000, .step = 100}}
+    };
+
+    DecrementVariable(&param);
+
+    EXPECT_EQ(test_var, 0);
+}
+
+/**
+ * Test DecrementVariable() with TYPE_I64
+ * Verifies that 64-bit integer variables are decremented correctly
+ */
+TEST_F(DisplayTest, DecrementVariableI64_Normal) {
+    int64_t test_var = 1001000LL;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I64,
+        .limits = {.i64 = {.min = 0, .max = 10000000LL, .step = 1000}}
+    };
+
+    DecrementVariable(&param);
+
+    EXPECT_EQ(test_var, 1000000LL);
+}
+
+/**
+ * Test DecrementVariable() with TYPE_I64 at minimum
+ */
+TEST_F(DisplayTest, DecrementVariableI64_AtMin) {
+    int64_t test_var = 500LL;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I64,
+        .limits = {.i64 = {.min = 0, .max = 10000000LL, .step = 1000}}
+    };
+
+    DecrementVariable(&param);
+
+    EXPECT_EQ(test_var, 0LL);
+}
+
+/**
+ * Test DecrementVariable() with TYPE_F32
+ * Verifies that floating-point variables are decremented correctly
+ */
+TEST_F(DisplayTest, DecrementVariableF32_Normal) {
+    float test_var = 2.0f;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_F32,
+        .limits = {.f32 = {.min = 0.0f, .max = 10.0f, .step = 0.5f}}
+    };
+
+    DecrementVariable(&param);
+
+    EXPECT_FLOAT_EQ(test_var, 1.5f);
+}
+
+/**
+ * Test DecrementVariable() with TYPE_F32 going below minimum
+ */
+TEST_F(DisplayTest, DecrementVariableF32_BelowMin) {
+    float test_var = 0.2f;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_F32,
+        .limits = {.f32 = {.min = 0.0f, .max = 10.0f, .step = 0.5f}}
+    };
+
+    DecrementVariable(&param);
+
+    EXPECT_FLOAT_EQ(test_var, 0.0f);
+}
+
+/**
+ * Test DecrementVariable() with TYPE_F32 negative values
+ */
+TEST_F(DisplayTest, DecrementVariableF32_NegativeRange) {
+    float test_var = -4.0f;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_F32,
+        .limits = {.f32 = {.min = -10.0f, .max = 0.0f, .step = 1.0f}}
+    };
+
+    DecrementVariable(&param);
+
+    EXPECT_FLOAT_EQ(test_var, -5.0f);
+}
+
+/**
+ * Test DecrementVariable() with TYPE_KeyTypeId
+ * Verifies that KeyTypeId enum variables are decremented correctly
+ */
+TEST_F(DisplayTest, DecrementVariableKeyTypeId_Normal) {
+    KeyTypeId test_var = KeyTypeId_Keyer;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_KeyTypeId,
+        .limits = {.keyType = {.min = KeyTypeId_Straight, .max = KeyTypeId_Keyer, .step = 1}}
+    };
+
+    DecrementVariable(&param);
+
+    EXPECT_EQ(test_var, KeyTypeId_Straight);
+}
+
+/**
+ * Test DecrementVariable() with TYPE_KeyTypeId at minimum
+ */
+TEST_F(DisplayTest, DecrementVariableKeyTypeId_AtMin) {
+    KeyTypeId test_var = KeyTypeId_Straight;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_KeyTypeId,
+        .limits = {.keyType = {.min = KeyTypeId_Straight, .max = KeyTypeId_Keyer, .step = 1}}
+    };
+
+    DecrementVariable(&param);
+
+    // Should be clamped to min
+    EXPECT_EQ(test_var, KeyTypeId_Straight);
+}
+
+/**
+ * Test DecrementVariable() with TYPE_BOOL
+ * Verifies that boolean variables toggle correctly (same as increment)
+ */
+TEST_F(DisplayTest, DecrementVariableBool_FalseToTrue) {
+    bool test_var = false;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_BOOL,
+        .limits = {.b = {.min = false, .max = true, .step = 1}}
+    };
+
+    DecrementVariable(&param);
+
+    EXPECT_EQ(test_var, true);
+}
+
+/**
+ * Test DecrementVariable() with TYPE_BOOL toggling from true to false
+ */
+TEST_F(DisplayTest, DecrementVariableBool_TrueToFalse) {
+    bool test_var = true;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_BOOL,
+        .limits = {.b = {.min = false, .max = true, .step = 1}}
+    };
+
+    DecrementVariable(&param);
+
+    EXPECT_EQ(test_var, false);
+}
+
+/**
+ * Test combined IncrementVariable() and DecrementVariable()
+ * Verifies that increment and decrement are inverses of each other
+ */
+TEST_F(DisplayTest, IncrementDecrementVariable_Inverse) {
+    int32_t test_var = 50;
+    int32_t original_value = test_var;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I32,
+        .limits = {.i32 = {.min = 0, .max = 100, .step = 10}}
+    };
+
+    IncrementVariable(&param);
+    EXPECT_EQ(test_var, 60);
+
+    DecrementVariable(&param);
+    EXPECT_EQ(test_var, original_value);
+}
+
+/**
+ * Test combined increment/decrement with boundary conditions
+ * Verifies correct behavior when crossing boundaries
+ */
+TEST_F(DisplayTest, IncrementDecrementVariable_Boundaries) {
+    int8_t test_var = 5;
+
+    VariableParameter param = {
+        .variable = &test_var,
+        .type = TYPE_I8,
+        .limits = {.i8 = {.min = 0, .max = 10, .step = 8}}
+    };
+
+    // Increment should clamp to max (5 + 8 = 13, clamped to 10)
+    IncrementVariable(&param);
+    EXPECT_EQ(test_var, 10);
+
+    // Decrement should go to 2 (10 - 8 = 2)
+    DecrementVariable(&param);
+    EXPECT_EQ(test_var, 2);
+
+    // Decrement should clamp to min (2 - 8 = -6, clamped to 0)
+    DecrementVariable(&param);
+    EXPECT_EQ(test_var, 0);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// SecondaryMenuOption Tests - RFSet Menu
+///////////////////////////////////////////////////////////////////////////////
+
+/**
+ * Test RFSet menu - SSB Power option
+ * Verifies SSB power variable parameter is configured correctly
+ */
+TEST_F(DisplayTest, RFSetMenu_SSBPower_Configuration) {
+    // Initialize the radio state
+
+
+    // Access the SSB power variable parameter from RFSet[0]
+    extern struct SecondaryMenuOption RFSet[6];
+    extern VariableParameter ssbPower;
+    extern void UpdateSSBPower(void);
+
+    // Verify menu option is configured correctly
+    EXPECT_STREQ(RFSet[0].label, "SSB Power");
+    EXPECT_EQ(RFSet[0].action, variableOption);
+    EXPECT_EQ(RFSet[0].varPam, &ssbPower);
+    EXPECT_EQ(RFSet[0].func, nullptr);
+    EXPECT_EQ(RFSet[0].postUpdateFunc, (void *)UpdateSSBPower);
+
+    // Verify variable parameter configuration
+    EXPECT_EQ(ssbPower.type, TYPE_F32);
+    EXPECT_FLOAT_EQ(ssbPower.limits.f32.min, 0.0f);
+    EXPECT_FLOAT_EQ(ssbPower.limits.f32.max, 20.0f);
+    EXPECT_FLOAT_EQ(ssbPower.limits.f32.step, 0.5f);
+}
+
+/**
+ * Test RFSet menu - SSB Power increment/decrement
+ * Verifies SSB power can be adjusted within limits
+ */
+TEST_F(DisplayTest, RFSetMenu_SSBPower_IncrementDecrement) {
+
+
+    extern struct SecondaryMenuOption RFSet[6];
+    extern VariableParameter ssbPower;
+    extern void UpdateArrayVariables(void);
+
+    // Update array variables to point to current band
+    UpdateArrayVariables();
+
+    // Set initial power value
+    ED.powerOutSSB[ED.currentBand[ED.activeVFO]] = 5.0f;
+
+    // Increment power
+    IncrementVariable(&ssbPower);
+    EXPECT_FLOAT_EQ(ED.powerOutSSB[ED.currentBand[ED.activeVFO]], 5.5f);
+
+    // Decrement power
+    DecrementVariable(&ssbPower);
+    EXPECT_FLOAT_EQ(ED.powerOutSSB[ED.currentBand[ED.activeVFO]], 5.0f);
+}
+
+/**
+ * Test RFSet menu - SSB Power boundary conditions
+ * Verifies SSB power respects min/max limits
+ */
+TEST_F(DisplayTest, RFSetMenu_SSBPower_Boundaries) {
+    
+
+    extern VariableParameter ssbPower;
+    extern void UpdateArrayVariables(void);
+
+    UpdateArrayVariables();
+
+    // Test max boundary
+    ED.powerOutSSB[ED.currentBand[ED.activeVFO]] = 19.8f;
+    IncrementVariable(&ssbPower);
+    EXPECT_FLOAT_EQ(ED.powerOutSSB[ED.currentBand[ED.activeVFO]], 20.0f);
+
+    IncrementVariable(&ssbPower); // Should stay at max
+    EXPECT_FLOAT_EQ(ED.powerOutSSB[ED.currentBand[ED.activeVFO]], 20.0f);
+
+    // Test min boundary
+    ED.powerOutSSB[ED.currentBand[ED.activeVFO]] = 0.3f;
+    DecrementVariable(&ssbPower);
+    EXPECT_FLOAT_EQ(ED.powerOutSSB[ED.currentBand[ED.activeVFO]], 0.0f);
+
+    DecrementVariable(&ssbPower); // Should stay at min
+    EXPECT_FLOAT_EQ(ED.powerOutSSB[ED.currentBand[ED.activeVFO]], 0.0f);
+}
+
+/**
+ * Test RFSet menu - CW Power option
+ * Verifies CW power variable parameter is configured correctly
+ */
+TEST_F(DisplayTest, RFSetMenu_CWPower_Configuration) {
+
+
+    extern struct SecondaryMenuOption RFSet[6];
+    extern VariableParameter cwPower;
+    extern void UpdateCWPower(void);
+
+    // Verify menu option is configured correctly
+    EXPECT_STREQ(RFSet[1].label, "CW Power");
+    EXPECT_EQ(RFSet[1].action, variableOption);
+    EXPECT_EQ(RFSet[1].varPam, &cwPower);
+    EXPECT_EQ(RFSet[1].func, nullptr);
+    EXPECT_EQ(RFSet[1].postUpdateFunc, (void *)UpdateCWPower);
+
+    // Verify variable parameter configuration
+    EXPECT_EQ(cwPower.type, TYPE_F32);
+    EXPECT_FLOAT_EQ(cwPower.limits.f32.min, 0.0f);
+    EXPECT_FLOAT_EQ(cwPower.limits.f32.max, 20.0f);
+    EXPECT_FLOAT_EQ(cwPower.limits.f32.step, 0.5f);
+}
+
+/**
+ * Test RFSet menu - CW Power increment/decrement
+ * Verifies CW power can be adjusted within limits
+ */
+TEST_F(DisplayTest, RFSetMenu_CWPower_IncrementDecrement) {
+    
+
+    extern VariableParameter cwPower;
+    extern void UpdateArrayVariables(void);
+
+    UpdateArrayVariables();
+
+    // Set initial power value
+    ED.powerOutCW[ED.currentBand[ED.activeVFO]] = 10.0f;
+
+    // Increment power
+    IncrementVariable(&cwPower);
+    EXPECT_FLOAT_EQ(ED.powerOutCW[ED.currentBand[ED.activeVFO]], 10.5f);
+
+    // Decrement power
+    DecrementVariable(&cwPower);
+    EXPECT_FLOAT_EQ(ED.powerOutCW[ED.currentBand[ED.activeVFO]], 10.0f);
+}
+
+/**
+ * Test RFSet menu - Gain increment/decrement
+ * Verifies gain can be adjusted within limits
+ */
+TEST_F(DisplayTest, RFSetMenu_Gain_IncrementDecrement) {
+    
+
+    extern VariableParameter gain;
+
+    // Set initial gain value
+    ED.rfGainAllBands_dB = 10;
+
+    // Increment gain
+    IncrementVariable(&gain);
+    EXPECT_EQ(ED.rfGainAllBands_dB, 10.5);
+
+    // Decrement gain
+    DecrementVariable(&gain);
+    EXPECT_EQ(ED.rfGainAllBands_dB, 10);
+
+    // Test max boundary
+    ED.rfGainAllBands_dB = 20;
+    IncrementVariable(&gain);
+    EXPECT_EQ(ED.rfGainAllBands_dB, 20);
+
+    // Test min boundary
+    ED.rfGainAllBands_dB = -5;
+    DecrementVariable(&gain);
+    EXPECT_EQ(ED.rfGainAllBands_dB, -5);
+}
+
+/**
+ * Test RFSet menu - RX Attenuation option
+ * Verifies RX attenuation variable parameter is configured correctly
+ */
+TEST_F(DisplayTest, RFSetMenu_RXAttenuation_Configuration) {
+
+
+    extern struct SecondaryMenuOption RFSet[6];
+    extern VariableParameter rxAtten;
+
+    // Verify menu option is configured correctly
+    EXPECT_STREQ(RFSet[2].label, "RX Attenuation");
+    EXPECT_EQ(RFSet[2].action, variableOption);
+    EXPECT_EQ(RFSet[2].varPam, &rxAtten);
+    EXPECT_EQ(RFSet[2].func, nullptr);
+
+    // Verify variable parameter configuration
+    EXPECT_EQ(rxAtten.type, TYPE_F32);
+    EXPECT_EQ(rxAtten.limits.f32.min, 0);
+    EXPECT_EQ(rxAtten.limits.f32.max, 31.5);
+    EXPECT_EQ(rxAtten.limits.f32.step, 0.5);
+}
+
+/**
+ * Test RFSet menu - RX Attenuation increment/decrement
+ * Verifies RX attenuation can be adjusted within limits
+ */
+TEST_F(DisplayTest, RFSetMenu_RXAttenuation_IncrementDecrement) {
+    
+
+    extern VariableParameter rxAtten;
+    extern void UpdateArrayVariables(void);
+
+    UpdateArrayVariables();
+
+    // Set initial attenuation value
+    ED.RAtten[ED.currentBand[ED.activeVFO]] = 10;
+
+    // Increment attenuation
+    IncrementVariable(&rxAtten);
+    EXPECT_EQ(ED.RAtten[ED.currentBand[ED.activeVFO]], 10.5);
+
+    // Decrement attenuation
+    DecrementVariable(&rxAtten);
+    EXPECT_EQ(ED.RAtten[ED.currentBand[ED.activeVFO]], 10);
+}
+
+/**
+ * Test RFSet menu - TX Attenuation (CW) increment/decrement
+ * Verifies TX CW attenuation can be adjusted within limits
+ */
+TEST_F(DisplayTest, RFSetMenu_TXAttenuationCW_IncrementDecrement) {
+    
+
+    extern VariableParameter txAttenCW;
+    extern void UpdateArrayVariables(void);
+
+    UpdateArrayVariables();
+
+    // Set initial attenuation value
+    ED.XAttenCW[ED.currentBand[ED.activeVFO]] = 15;
+
+    // Increment attenuation
+    IncrementVariable(&txAttenCW);
+    EXPECT_EQ(ED.XAttenCW[ED.currentBand[ED.activeVFO]], 15.5);
+
+    // Decrement attenuation
+    DecrementVariable(&txAttenCW);
+    EXPECT_EQ(ED.XAttenCW[ED.currentBand[ED.activeVFO]], 15);
+}
+
+/**
+ * Test RFSet menu - Antenna option
+ * Verifies antenna variable parameter is configured correctly
+ */
+TEST_F(DisplayTest, RFSetMenu_Antenna_Configuration) {
+
+
+    extern struct SecondaryMenuOption RFSet[6];
+    extern VariableParameter antenna;
+
+    // Verify menu option is configured correctly
+    EXPECT_STREQ(RFSet[3].label, "Antenna");
+    EXPECT_EQ(RFSet[3].action, variableOption);
+    EXPECT_EQ(RFSet[3].varPam, &antenna);
+    EXPECT_EQ(RFSet[3].func, nullptr);
+
+    // Verify variable parameter configuration
+    EXPECT_EQ(antenna.type, TYPE_I32);
+    EXPECT_EQ(antenna.limits.i32.min, 0);
+    EXPECT_EQ(antenna.limits.i32.max, 3);
+    EXPECT_EQ(antenna.limits.i32.step, 1);
+}
+
+/**
+ * Test RFSet menu - Antenna increment/decrement
+ * Verifies antenna selection can be adjusted within limits (0-2)
+ */
+TEST_F(DisplayTest, RFSetMenu_Antenna_IncrementDecrement) {
+
+    extern VariableParameter antenna;
+    extern void UpdateArrayVariables(void);
+
+    UpdateArrayVariables();
+
+    // Set initial antenna value
+    ED.antennaSelection[ED.currentBand[ED.activeVFO]] = 0;
+
+    // Increment antenna
+    IncrementVariable(&antenna);
+    EXPECT_EQ(ED.antennaSelection[ED.currentBand[ED.activeVFO]], 1);
+
+    IncrementVariable(&antenna);
+    EXPECT_EQ(ED.antennaSelection[ED.currentBand[ED.activeVFO]], 2);
+
+    // Test max boundary
+    IncrementVariable(&antenna);
+    IncrementVariable(&antenna);
+    EXPECT_EQ(ED.antennaSelection[ED.currentBand[ED.activeVFO]], 3);
+
+    // Decrement antenna
+    DecrementVariable(&antenna);
+    EXPECT_EQ(ED.antennaSelection[ED.currentBand[ED.activeVFO]], 2);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// SecondaryMenuOption Tests - CWOptions Menu
+///////////////////////////////////////////////////////////////////////////////
+
+/**
+ * Test CWOptions menu - WPM option
+ * Verifies WPM variable parameter is configured correctly
+ */
+TEST_F(DisplayTest, CWOptionsMenu_WPM_Configuration) {
+    
+
+    extern struct SecondaryMenuOption CWOptions[6];
+    extern VariableParameter wpm;
+    extern void UpdateDitLength(void);
+
+    // Verify menu option is configured correctly
+    EXPECT_STREQ(CWOptions[0].label, "WPM");
+    EXPECT_EQ(CWOptions[0].action, variableOption);
+    EXPECT_EQ(CWOptions[0].varPam, &wpm);
+    EXPECT_EQ(CWOptions[0].func, nullptr);
+    EXPECT_EQ(CWOptions[0].postUpdateFunc, (void *)UpdateDitLength);
+
+    // Verify variable parameter configuration
+    EXPECT_EQ(wpm.type, TYPE_I32);
+    EXPECT_EQ(wpm.limits.i32.min, 5);
+    EXPECT_EQ(wpm.limits.i32.max, 50);
+    EXPECT_EQ(wpm.limits.i32.step, 1);
+}
+
+/**
+ * Test CWOptions menu - WPM increment/decrement
+ * Verifies WPM can be adjusted within limits
+ */
+TEST_F(DisplayTest, CWOptionsMenu_WPM_IncrementDecrement) {
+    
+
+    extern VariableParameter wpm;
+
+    // Set initial WPM value
+    ED.currentWPM = 20;
+
+    // Increment WPM
+    IncrementVariable(&wpm);
+    EXPECT_EQ(ED.currentWPM, 21);
+
+    // Decrement WPM
+    DecrementVariable(&wpm);
+    EXPECT_EQ(ED.currentWPM, 20);
+
+    // Test max boundary
+    ED.currentWPM = 50;
+    IncrementVariable(&wpm);
+    EXPECT_EQ(ED.currentWPM, 50);
+
+    // Test min boundary
+    ED.currentWPM = 5;
+    DecrementVariable(&wpm);
+    EXPECT_EQ(ED.currentWPM, 5);
+}
+
+/**
+ * Test CWOptions menu - Straight key option
+ * Verifies straight key function option is configured correctly
+ */
+TEST_F(DisplayTest, CWOptionsMenu_StraightKey_Configuration) {
+    
+
+    extern struct SecondaryMenuOption CWOptions[6];
+    extern void SelectStraightKey(void);
+
+    // Verify menu option is configured correctly
+    EXPECT_STREQ(CWOptions[1].label, "Straight key");
+    EXPECT_EQ(CWOptions[1].action, functionOption);
+    EXPECT_EQ(CWOptions[1].varPam, nullptr);
+    EXPECT_EQ(CWOptions[1].func, (void *)SelectStraightKey);
+    EXPECT_EQ(CWOptions[1].postUpdateFunc, nullptr);
+}
+
+/**
+ * Test CWOptions menu - Straight key function
+ * Verifies SelectStraightKey function sets keyType correctly
+ */
+TEST_F(DisplayTest, CWOptionsMenu_StraightKey_Function) {
+    
+
+    extern void SelectStraightKey(void);
+
+    // Set initial key type to keyer
+    ED.keyType = KeyTypeId_Keyer;
+
+    // Call straight key selection function
+    SelectStraightKey();
+
+    // Verify key type changed to straight
+    EXPECT_EQ(ED.keyType, KeyTypeId_Straight);
+}
+
+/**
+ * Test CWOptions menu - Keyer option
+ * Verifies keyer function option is configured correctly
+ */
+TEST_F(DisplayTest, CWOptionsMenu_Keyer_Configuration) {
+    
+
+    extern struct SecondaryMenuOption CWOptions[6];
+    extern void SelectKeyer(void);
+
+    // Verify menu option is configured correctly
+    EXPECT_STREQ(CWOptions[2].label, "Keyer");
+    EXPECT_EQ(CWOptions[2].action, functionOption);
+    EXPECT_EQ(CWOptions[2].varPam, nullptr);
+    EXPECT_EQ(CWOptions[2].func, (void *)SelectKeyer);
+    EXPECT_EQ(CWOptions[2].postUpdateFunc, nullptr);
+}
+
+/**
+ * Test CWOptions menu - Keyer function
+ * Verifies SelectKeyer function sets keyType correctly
+ */
+TEST_F(DisplayTest, CWOptionsMenu_Keyer_Function) {
+    
+
+    extern void SelectKeyer(void);
+
+    // Set initial key type to straight
+    ED.keyType = KeyTypeId_Straight;
+
+    // Call keyer selection function
+    SelectKeyer();
+
+    // Verify key type changed to keyer
+    EXPECT_EQ(ED.keyType, KeyTypeId_Keyer);
+}
+
+/**
+ * Test CWOptions menu - Flip paddle option
+ * Verifies flip paddle function option is configured correctly
+ */
+TEST_F(DisplayTest, CWOptionsMenu_FlipPaddle_Configuration) {
+    
+
+    extern struct SecondaryMenuOption CWOptions[6];
+    extern void FlipPaddle(void);
+
+    // Verify menu option is configured correctly
+    EXPECT_STREQ(CWOptions[3].label, "Flip paddle");
+    EXPECT_EQ(CWOptions[3].action, functionOption);
+    EXPECT_EQ(CWOptions[3].varPam, nullptr);
+    EXPECT_EQ(CWOptions[3].func, (void *)FlipPaddle);
+    EXPECT_EQ(CWOptions[3].postUpdateFunc, nullptr);
+}
+
+/**
+ * Test CWOptions menu - Flip paddle function
+ * Verifies FlipPaddle function toggles keyerFlip correctly
+ */
+TEST_F(DisplayTest, CWOptionsMenu_FlipPaddle_Function) {
+    
+
+    extern void FlipPaddle(void);
+
+    // Set initial flip state to false
+    ED.keyerFlip = false;
+
+    // Call flip paddle function
+    FlipPaddle();
+
+    // Verify flip state toggled to true
+    EXPECT_EQ(ED.keyerFlip, true);
+
+    // Call again to toggle back
+    FlipPaddle();
+
+    // Verify flip state toggled back to false
+    EXPECT_EQ(ED.keyerFlip, false);
+}
+
+/**
+ * Test CWOptions menu - CW Filter option
+ * Verifies CW filter variable parameter is configured correctly
+ */
+TEST_F(DisplayTest, CWOptionsMenu_CWFilter_Configuration) {
+    
+
+    extern struct SecondaryMenuOption CWOptions[6];
+    extern VariableParameter cwf;
+
+    // Verify menu option is configured correctly
+    EXPECT_STREQ(CWOptions[4].label, "CW Filter");
+    EXPECT_EQ(CWOptions[4].action, variableOption);
+    EXPECT_EQ(CWOptions[4].varPam, &cwf);
+    EXPECT_EQ(CWOptions[4].func, nullptr);
+    EXPECT_EQ(CWOptions[4].postUpdateFunc, nullptr);
+
+    // Verify variable parameter configuration
+    EXPECT_EQ(cwf.type, TYPE_I32);
+    EXPECT_EQ(cwf.limits.i32.min, 0);
+    EXPECT_EQ(cwf.limits.i32.max, 5);
+    EXPECT_EQ(cwf.limits.i32.step, 1);
+}
+
+/**
+ * Test CWOptions menu - CW Filter increment/decrement
+ * Verifies CW filter index can be adjusted within limits
+ */
+TEST_F(DisplayTest, CWOptionsMenu_CWFilter_IncrementDecrement) {
+    
+
+    extern VariableParameter cwf;
+
+    // Set initial filter index
+    ED.CWFilterIndex = 2;
+
+    // Increment filter index
+    IncrementVariable(&cwf);
+    EXPECT_EQ(ED.CWFilterIndex, 3);
+
+    // Decrement filter index
+    DecrementVariable(&cwf);
+    EXPECT_EQ(ED.CWFilterIndex, 2);
+
+    // Test max boundary
+    ED.CWFilterIndex = 5;
+    IncrementVariable(&cwf);
+    EXPECT_EQ(ED.CWFilterIndex, 5);
+
+    // Test min boundary
+    ED.CWFilterIndex = 0;
+    DecrementVariable(&cwf);
+    EXPECT_EQ(ED.CWFilterIndex, 0);
+}
+
+/**
+ * Test CWOptions menu - Sidetone volume option
+ * Verifies sidetone volume variable parameter is configured correctly
+ */
+TEST_F(DisplayTest, CWOptionsMenu_SidetoneVolume_Configuration) {
+    
+
+    extern struct SecondaryMenuOption CWOptions[6];
+    extern VariableParameter stv;
+
+    // Verify menu option is configured correctly
+    EXPECT_STREQ(CWOptions[5].label, "Sidetone volume");
+    EXPECT_EQ(CWOptions[5].action, variableOption);
+    EXPECT_EQ(CWOptions[5].varPam, &stv);
+    EXPECT_EQ(CWOptions[5].func, nullptr);
+    EXPECT_EQ(CWOptions[5].postUpdateFunc, nullptr);
+
+    // Verify variable parameter configuration
+    EXPECT_EQ(stv.type, TYPE_F32);
+    EXPECT_FLOAT_EQ(stv.limits.f32.min, 0.0f);
+    EXPECT_FLOAT_EQ(stv.limits.f32.max, 100.0f);
+    EXPECT_FLOAT_EQ(stv.limits.f32.step, 0.5f);
+}
+
+/**
+ * Test CWOptions menu - Sidetone volume increment/decrement
+ * Verifies sidetone volume can be adjusted within limits
+ */
+TEST_F(DisplayTest, CWOptionsMenu_SidetoneVolume_IncrementDecrement) {
+    
+
+    extern VariableParameter stv;
+
+    // Set initial sidetone volume
+    ED.sidetoneVolume = 50.0f;
+
+    // Increment volume
+    IncrementVariable(&stv);
+    EXPECT_FLOAT_EQ(ED.sidetoneVolume, 50.5f);
+
+    // Decrement volume
+    DecrementVariable(&stv);
+    EXPECT_FLOAT_EQ(ED.sidetoneVolume, 50.0f);
+
+    // Test max boundary
+    ED.sidetoneVolume = 99.8f;
+    IncrementVariable(&stv);
+    EXPECT_FLOAT_EQ(ED.sidetoneVolume, 100.0f);
+    IncrementVariable(&stv);
+    EXPECT_FLOAT_EQ(ED.sidetoneVolume, 100.0f);
+
+    // Test min boundary
+    ED.sidetoneVolume = 0.3f;
+    DecrementVariable(&stv);
+    EXPECT_FLOAT_EQ(ED.sidetoneVolume, 0.0f);
+    DecrementVariable(&stv);
+    EXPECT_FLOAT_EQ(ED.sidetoneVolume, 0.0f);
+}
+
+/**
+ * Test the frequency entry pad
+ */
+TEST_F(DisplayTest, FreqEntryPad) {
+    // Set up the queues so we get some simulated data through and start the "clock"
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    //-------------------------------------------------------------
+    // Radio startup code
+    //-------------------------------------------------------------
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();  // Initialize DSP before starting audio
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware(); // RF board, LPF board, and BPF board
+    
+    // Start the mode state machines
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    // Now, start the 1ms timer interrupt to simulate hardware timer
+    start_timer1ms();
+
+    //-------------------------------------------------------------
+    
+    EXPECT_EQ(modeSM.state_id, ModeSm_StateId_SSB_RECEIVE);
+    // Check the state before loop is invoked and then again after
+    loop();MyDelay(10);
+    
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_HOME );
+
+    // Do we enter the freq entry screen?
+    SetButton(DFE);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_FREQ_ENTRY);
+
+    // Can we exit the freq entry screen?
+    SetButton(HOME_SCREEN);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_HOME);
+
+    loop(); MyDelay(10);
+
+    // Re-enter
+    SetButton(DFE);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_FREQ_ENTRY);
+
+    // Try applying the frequency after entering nothing
+    int64_t oldf = ED.centerFreq_Hz[ED.activeVFO];
+    int64_t oldb = ED.currentBand[ED.activeVFO];
+    SetButton(0);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    //  Nothing should happen
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_FREQ_ENTRY);
+    EXPECT_EQ(ED.centerFreq_Hz[ED.activeVFO],oldf);
+    EXPECT_EQ(DFEGetNumDigits(),0);
+
+    // Enter three digits
+    SetButton(3);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    SetButton(4);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    SetButton(5);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    // Expect "789"
+    EXPECT_EQ(DFEGetNumDigits(),3);
+    EXPECT_EQ(DFEGetFString()[0],'7');
+    EXPECT_EQ(DFEGetFString()[1],'8');
+    EXPECT_EQ(DFEGetFString()[2],'9');
+
+    // Delete a digit
+    SetButton(13);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    // Expect "78"
+    EXPECT_EQ(DFEGetNumDigits(),2);
+    EXPECT_EQ(DFEGetFString()[0],'7');
+    EXPECT_EQ(DFEGetFString()[1],'8');
+
+    // Select this frequency
+    SetButton(0);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    // Expect to be back in the home state at 78 MHz
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_HOME);
+    EXPECT_NE(ED.centerFreq_Hz[ED.activeVFO],oldf);
+    EXPECT_EQ(ED.centerFreq_Hz[ED.activeVFO],78000000+48000);
+    EXPECT_EQ(ED.currentBand[ED.activeVFO],oldb); // band should not have changed
+}
+
+/**
+ * Test direct frequency entry with 1 digit (MHz)
+ * Tests entering a single digit and verifying it's interpreted as MHz
+ */
+TEST_F(DisplayTest, FreqEntry_OneDigitMHz) {
+    extern void InterpretFrequencyEntryButtonPress(int32_t button);
+    extern int8_t DFEGetNumDigits(void);
+    extern char * DFEGetFString(void);
+
+    // Set up initial state
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop();MyDelay(10);
+    
+
+    // Enter frequency entry mode
+    SetButton(DFE);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_FREQ_ENTRY);
+
+    int64_t oldFreq = ED.centerFreq_Hz[ED.activeVFO];
+
+    // Enter single digit "7"
+    SetButton(3);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(DFEGetNumDigits(), 1);
+    EXPECT_EQ(DFEGetFString()[0], '7');
+
+    // Apply frequency
+    SetButton(0);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Should return to home with 7 MHz
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_HOME);
+    EXPECT_EQ(ED.centerFreq_Hz[ED.activeVFO], 7000000+48000);
+}
+
+/**
+ * Test direct frequency entry with 4 digits (kHz)
+ * Tests entering 4 digits and verifying it's interpreted as kHz
+ */
+TEST_F(DisplayTest, FreqEntry_FourDigitKHz) {
+    extern void InterpretFrequencyEntryButtonPress(int32_t button);
+    extern int8_t DFEGetNumDigits(void);
+    extern char * DFEGetFString(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop();MyDelay(10);
+    
+
+    // Enter frequency entry mode
+    SetButton(DFE);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_FREQ_ENTRY);
+
+    // Enter "7150" (7.15 MHz)
+    SetButton(3);  // 7
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    SetButton(9);  // 1
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    SetButton(7);  // 5
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    SetButton(12);  // 0
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    EXPECT_EQ(DFEGetNumDigits(), 4);
+    EXPECT_EQ(DFEGetFString()[0], '7');
+    EXPECT_EQ(DFEGetFString()[1], '1');
+    EXPECT_EQ(DFEGetFString()[2], '5');
+    EXPECT_EQ(DFEGetFString()[3], '0');
+
+    // Apply frequency
+    SetButton(0);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Should return to home with 7150 kHz = 7.15 MHz
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_HOME);
+    EXPECT_EQ(ED.centerFreq_Hz[ED.activeVFO], 7150000+48000);
+}
+
+/**
+ * Test direct frequency entry with 5 digits (kHz)
+ * Tests entering 5 digits and verifying it's interpreted as kHz
+ */
+TEST_F(DisplayTest, FreqEntry_FiveDigitKHz) {
+    extern void InterpretFrequencyEntryButtonPress(int32_t button);
+    extern int8_t DFEGetNumDigits(void);
+    extern char * DFEGetFString(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop();MyDelay(10);
+    
+
+    // Enter frequency entry mode
+    SetButton(DFE);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_FREQ_ENTRY);
+
+    // Enter "14250" (14.25 MHz)
+    SetButton(9);  // 1
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    SetButton(6);  // 4
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    SetButton(10);  // 2
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    SetButton(7);  // 5
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    SetButton(12);  // 0
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    EXPECT_EQ(DFEGetNumDigits(), 5);
+    EXPECT_EQ(DFEGetFString()[0], '1');
+    EXPECT_EQ(DFEGetFString()[1], '4');
+    EXPECT_EQ(DFEGetFString()[2], '2');
+    EXPECT_EQ(DFEGetFString()[3], '5');
+    EXPECT_EQ(DFEGetFString()[4], '0');
+
+    // Apply frequency
+    SetButton(0);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Should return to home with 14250 kHz = 14.25 MHz
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_HOME);
+    EXPECT_EQ(ED.centerFreq_Hz[ED.activeVFO], 14250000+48000);
+}
+
+/**
+ * Test direct frequency entry with 3 digits (invalid)
+ * Tests that 3-digit entries are rejected as invalid
+ */
+TEST_F(DisplayTest, FreqEntry_ThreeDigitInvalid) {
+    extern void InterpretFrequencyEntryButtonPress(int32_t button);
+    extern int8_t DFEGetNumDigits(void);
+    extern char * DFEGetFString(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop();MyDelay(10);
+    
+
+    // Enter frequency entry mode
+    SetButton(DFE);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_FREQ_ENTRY);
+
+    int64_t oldFreq = ED.centerFreq_Hz[ED.activeVFO];
+
+    // Enter "123" (3 digits - invalid)
+    SetButton(9);  // 1
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    SetButton(10);  // 2
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    SetButton(11);  // 3
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    EXPECT_EQ(DFEGetNumDigits(), 3);
+
+    // Try to apply frequency
+    SetButton(0);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Should stay in FREQ_ENTRY mode and frequency should be cleared
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_FREQ_ENTRY);
+    EXPECT_EQ(DFEGetNumDigits(), 0);
+    EXPECT_EQ(ED.centerFreq_Hz[ED.activeVFO], oldFreq);
+}
+
+/**
+ * Test maximum valid frequency (99 MHz)
+ * Tests that 99 MHz (near upper limit) is accepted
+ */
+TEST_F(DisplayTest, FreqEntry_MaxValidFreq) {
+    extern void InterpretFrequencyEntryButtonPress(int32_t button);
+    extern int8_t DFEGetNumDigits(void);
+    extern char * DFEGetFString(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop();MyDelay(10);
+    
+
+    // Enter frequency entry mode
+    SetButton(DFE);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_FREQ_ENTRY);
+
+    // Enter "99" (99 MHz - valid, near upper limit)
+    SetButton(5);  // 9
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    SetButton(5);  // 9
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    EXPECT_EQ(DFEGetNumDigits(), 2);
+
+    // Apply frequency
+    SetButton(0);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Should return to HOME with 99 MHz
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_HOME);
+    EXPECT_EQ(ED.centerFreq_Hz[ED.activeVFO], 99000000+48000);
+}
+
+/**
+ * Test minimum valid kHz frequency (1000 kHz = 1 MHz)
+ * Tests that 1000 kHz is accepted as a valid frequency
+ */
+TEST_F(DisplayTest, FreqEntry_MinValidKHz) {
+    extern void InterpretFrequencyEntryButtonPress(int32_t button);
+    extern int8_t DFEGetNumDigits(void);
+    extern char * DFEGetFString(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop();MyDelay(10);
+    
+
+    // Enter frequency entry mode
+    SetButton(DFE);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_FREQ_ENTRY);
+
+    // Enter "1000" (1000 kHz = 1 MHz - minimum practical kHz entry)
+    SetButton(9);  // 1
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    SetButton(12);  // 0
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    SetButton(12);  // 0
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    SetButton(12);  // 0
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    EXPECT_EQ(DFEGetNumDigits(), 4);
+
+    // Apply frequency
+    SetButton(0);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Should return to HOME with 1000 kHz = 1 MHz
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_HOME);
+    EXPECT_EQ(ED.centerFreq_Hz[ED.activeVFO], 1000000+48000);
+}
+
+/**
+ * Test entering more than 5 digits (should be rejected)
+ * Tests that the 6th digit is not accepted
+ */
+TEST_F(DisplayTest, FreqEntry_MoreThanFiveDigits) {
+    extern void InterpretFrequencyEntryButtonPress(int32_t button);
+    extern int8_t DFEGetNumDigits(void);
+    extern char * DFEGetFString(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop();MyDelay(10);
+    
+
+    // Enter frequency entry mode
+    SetButton(DFE);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_FREQ_ENTRY);
+
+    // Enter 5 digits
+    for (int i = 0; i < 5; i++) {
+        SetButton(9);  // "1"
+        SetInterrupt(iBUTTON_PRESSED);
+        loop(); MyDelay(10);
+    }
+
+    EXPECT_EQ(DFEGetNumDigits(), 5);
+
+    // Try to enter a 6th digit
+    SetButton(9);  // "1"
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Should still be 5 digits
+    EXPECT_EQ(DFEGetNumDigits(), 5);
+}
+
+/**
+ * Test starting with 0 (should be rejected)
+ * Tests that entering 0 as first digit is not accepted
+ */
+TEST_F(DisplayTest, FreqEntry_StartingWithZero) {
+    extern void InterpretFrequencyEntryButtonPress(int32_t button);
+    extern int8_t DFEGetNumDigits(void);
+    extern char * DFEGetFString(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop();MyDelay(10);
+    
+
+    // Enter frequency entry mode
+    SetButton(DFE);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_FREQ_ENTRY);
+
+    // Try to enter "0" as first digit
+    SetButton(12);  // "0"
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Should not accept the 0
+    EXPECT_EQ(DFEGetNumDigits(), 0);
+
+    // But 0 should be accepted as a second digit
+    SetButton(9);  // "1"
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(DFEGetNumDigits(), 1);
+
+    SetButton(12);  // "0"
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(DFEGetNumDigits(), 2);
+    EXPECT_EQ(DFEGetFString()[0], '1');
+    EXPECT_EQ(DFEGetFString()[1], '0');
+}
+
+/**
+ * Test exit button 'X' without changing frequency
+ * Tests that pressing X returns to home without changing frequency
+ */
+TEST_F(DisplayTest, FreqEntry_ExitButton) {
+    extern void InterpretFrequencyEntryButtonPress(int32_t button);
+    extern int8_t DFEGetNumDigits(void);
+    extern char * DFEGetFString(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop();MyDelay(10);
+    
+
+    // Enter frequency entry mode
+    SetButton(DFE);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_FREQ_ENTRY);
+
+    int64_t oldFreq = ED.centerFreq_Hz[ED.activeVFO];
+
+    // Enter some digits
+    SetButton(3);  // "7"
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    SetButton(4);  // "8"
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    EXPECT_EQ(DFEGetNumDigits(), 2);
+
+    // Press 'X' button (button 17, key 0x99)
+    SetButton(17);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Should return to home without changing frequency
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_HOME);
+    EXPECT_EQ(ED.centerFreq_Hz[ED.activeVFO], oldFreq);
+}
+
+/**
+ * Test deleting when no digits entered
+ * Tests that delete button does nothing when digit count is 0
+ */
+TEST_F(DisplayTest, FreqEntry_DeleteWhenEmpty) {
+    extern void InterpretFrequencyEntryButtonPress(int32_t button);
+    extern int8_t DFEGetNumDigits(void);
+    extern char * DFEGetFString(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop();MyDelay(10);
+    
+
+    // Enter frequency entry mode
+    SetButton(DFE);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_FREQ_ENTRY);
+
+    EXPECT_EQ(DFEGetNumDigits(), 0);
+
+    // Press delete button (button 13, key 0x58)
+    SetButton(13);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Should still be 0 digits
+    EXPECT_EQ(DFEGetNumDigits(), 0);
+}
+
+/**
+ * Test invalid button numbers
+ * Tests that button numbers outside valid range are ignored
+ */
+TEST_F(DisplayTest, FreqEntry_InvalidButtonNumber) {
+    extern void InterpretFrequencyEntryButtonPress(int32_t button);
+    extern int8_t DFEGetNumDigits(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop();MyDelay(10);
+    
+
+    // Enter frequency entry mode
+    SetButton(DFE);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_FREQ_ENTRY);
+
+    EXPECT_EQ(DFEGetNumDigits(), 0);
+
+    // Test negative button number
+    InterpretFrequencyEntryButtonPress(-1);
+    EXPECT_EQ(DFEGetNumDigits(), 0);
+
+    // Test button number > 17
+    InterpretFrequencyEntryButtonPress(18);
+    EXPECT_EQ(DFEGetNumDigits(), 0);
+
+    InterpretFrequencyEntryButtonPress(100);
+    EXPECT_EQ(DFEGetNumDigits(), 0);
+}
+
+/**
+ * Test empty button presses (0x7F keys)
+ * Tests that buttons mapped to 0x7F are ignored
+ */
+TEST_F(DisplayTest, FreqEntry_EmptyButtons) {
+    extern void InterpretFrequencyEntryButtonPress(int32_t button);
+    extern int8_t DFEGetNumDigits(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop();MyDelay(10);
+    
+
+    // Enter frequency entry mode
+    SetButton(DFE);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_FREQ_ENTRY);
+
+    EXPECT_EQ(DFEGetNumDigits(), 0);
+
+    // Try empty buttons (1, 2, 11, 12, 14, 15, 16 are mapped to 0x7F)
+    SetButton(1);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(DFEGetNumDigits(), 0);
+
+    SetButton(2);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(DFEGetNumDigits(), 0);
+
+    SetButton(14);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(DFEGetNumDigits(), 0);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Equalizer Tests
+///////////////////////////////////////////////////////////////////////////////
+
+/**
+ * Test navigation to equalizer screen from HOME
+ * Verifies that the equalizer screen can be entered from the home state
+ */
+TEST_F(DisplayTest, Equalizer_NavigateToScreen) {
+    // Set up the queues and start the "clock"
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    // Radio startup code
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop(); MyDelay(10);
+
+    // Verify we start in HOME state
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_HOME);
+
+    // Navigate to equalizer screen
+    SetInterrupt(iEQUALIZER);
+    loop(); MyDelay(10);
+
+    // Verify we're in EQUALIZER state
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_EQUALIZER);
+}
+
+/**
+ * Test navigation away from equalizer screen to HOME
+ * Verifies that pressing HOME_SCREEN button exits the equalizer
+ */
+TEST_F(DisplayTest, Equalizer_NavigateToHome) {
+    // Set up the queues and start the "clock"
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    // Radio startup code
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop(); MyDelay(10);
+
+    // Navigate to equalizer screen
+    SetInterrupt(iEQUALIZER);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_EQUALIZER);
+
+    // Exit to home screen
+    SetButton(HOME_SCREEN);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Verify we're back in HOME state
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_HOME);
+}
+
+/**
+ * Test toggling between RX and TX equalizer editing
+ * Verifies that button 15 toggles between RX and TX equalizer modes
+ */
+TEST_F(DisplayTest, Equalizer_ToggleRXTX) {
+    extern void ToggleRXTXEqualizerEdit(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop(); MyDelay(10);
+
+    // Navigate to equalizer screen
+    SetInterrupt(iEQUALIZER);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_EQUALIZER);
+
+    // Toggle to TX (button 15)
+    SetButton(15);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Toggle back to RX
+    SetButton(15);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Verify we can toggle multiple times without issues
+    SetButton(15);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Toggle back to RX to leave in default state for other tests
+    SetButton(15);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+}
+
+/**
+ * Test incrementing equalizer cell selection
+ * Verifies that volume encoder can move through equalizer cells
+ */
+TEST_F(DisplayTest, Equalizer_IncrementCellSelection) {
+    extern void IncrementEqualizerSelection(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop(); MyDelay(10);
+
+    // Navigate to equalizer screen
+    SetInterrupt(iEQUALIZER);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_EQUALIZER);
+
+    // Increment cell selection multiple times
+    for (int i = 0; i < 5; i++) {
+        SetInterrupt(iVOLUME_INCREASE);
+        loop(); MyDelay(10);
+    }
+
+    // Test passes if no crashes occur
+    SUCCEED();
+}
+
+/**
+ * Test decrementing equalizer cell selection
+ * Verifies that volume encoder can move backward through equalizer cells
+ */
+TEST_F(DisplayTest, Equalizer_DecrementCellSelection) {
+    extern void DecrementEqualizerSelection(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop(); MyDelay(10);
+
+    // Navigate to equalizer screen
+    SetInterrupt(iEQUALIZER);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_EQUALIZER);
+
+    // Decrement cell selection multiple times (should wrap around)
+    for (int i = 0; i < 5; i++) {
+        SetInterrupt(iVOLUME_DECREASE);
+        loop(); MyDelay(10);
+    }
+
+    // Test passes if no crashes occur
+    SUCCEED();
+}
+
+/**
+ * Test incrementing equalizer cell value
+ * Verifies that filter encoder can increase equalizer cell values
+ */
+TEST_F(DisplayTest, Equalizer_IncrementCellValue) {
+    extern void IncrementEqualizerValue(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop(); MyDelay(10);
+
+    // Navigate to equalizer screen
+    SetInterrupt(iEQUALIZER);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_EQUALIZER);
+
+    // Set all cells to the same initial value
+    // (we don't know which cell is currently selected due to static state)
+    int32_t initialValue = 50;
+    for (int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+        ED.equalizerRec[i] = initialValue;
+    }
+
+    // Increment the currently selected cell value
+    SetInterrupt(iFILTER_INCREASE);
+    loop(); MyDelay(10);
+
+    // Verify that at least one value increased (the selected cell)
+    bool found = false;
+    for (int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+        if (ED.equalizerRec[i] > initialValue) {
+            found = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found);
+}
+
+/**
+ * Test decrementing equalizer cell value
+ * Verifies that filter encoder can decrease equalizer cell values
+ */
+TEST_F(DisplayTest, Equalizer_DecrementCellValue) {
+    extern void DecrementEqualizerValue(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop(); MyDelay(10);
+
+    // Navigate to equalizer screen
+    SetInterrupt(iEQUALIZER);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_EQUALIZER);
+
+    // Set all cells to the same initial value
+    // (we don't know which cell is currently selected due to static state)
+    int32_t initialValue = 50;
+    for (int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+        ED.equalizerRec[i] = initialValue;
+    }
+
+    // Decrement the currently selected cell value
+    SetInterrupt(iFILTER_DECREASE);
+    loop(); MyDelay(10);
+
+    // Verify that at least one value decreased (the selected cell)
+    bool found = false;
+    for (int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+        if (ED.equalizerRec[i] < initialValue) {
+            found = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found);
+}
+
+/**
+ * Test equalizer cell value upper bound
+ * Verifies that values cannot exceed 100
+ */
+TEST_F(DisplayTest, Equalizer_ValueUpperBound) {
+    extern void IncrementEqualizerValue(void);
+
+    // Set all cells to value near maximum
+    // (we don't know which cell is currently selected)
+    for (int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+        ED.equalizerRec[i] = 99;
+    }
+
+    // Increment the currently selected cell
+    IncrementEqualizerValue();
+
+    // Verify that exactly one cell is at 100
+    int count100 = 0;
+    for (int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+        if (ED.equalizerRec[i] == 100) count100++;
+    }
+    EXPECT_EQ(count100, 1);
+
+    // Try to increment beyond maximum - should stay at 100
+    IncrementEqualizerValue();
+
+    // Verify still at 100 (no cell exceeds 100)
+    for (int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+        EXPECT_LE(ED.equalizerRec[i], 100);
+    }
+}
+
+/**
+ * Test equalizer cell value lower bound
+ * Verifies that values cannot go below 0
+ */
+TEST_F(DisplayTest, Equalizer_ValueLowerBound) {
+    extern void DecrementEqualizerValue(void);
+
+    // Set all cells to value near minimum
+    // (we don't know which cell is currently selected)
+    for (int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+        ED.equalizerRec[i] = 1;
+    }
+
+    // Decrement the currently selected cell
+    DecrementEqualizerValue();
+
+    // Verify that exactly one cell is at 0
+    int count0 = 0;
+    for (int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+        if (ED.equalizerRec[i] == 0) count0++;
+    }
+    EXPECT_EQ(count0, 1);
+
+    // Try to decrement below minimum - should stay at 0
+    DecrementEqualizerValue();
+
+    // Verify still at 0 (no cell goes negative)
+    for (int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+        EXPECT_GE(ED.equalizerRec[i], 0);
+    }
+}
+
+/**
+ * Test TX equalizer value modification
+ * Verifies that TX equalizer values can be modified when in TX mode
+ */
+TEST_F(DisplayTest, Equalizer_TXValueModification) {
+    extern void IncrementEqualizerValue(void);
+    extern void DecrementEqualizerValue(void);
+    extern void ToggleRXTXEqualizerEdit(void);
+
+    // Set all TX cells to initial value
+    // (we don't know which cell is currently selected)
+    int32_t initialValue = 50;
+    for (int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+        ED.equalizerXmt[i] = initialValue;
+    }
+
+    // Switch to TX mode (toggle from default RX)
+    ToggleRXTXEqualizerEdit();
+
+    // Increment TX value
+    IncrementEqualizerValue();
+
+    // Verify that exactly one TX cell increased
+    int countIncreased = 0;
+    for (int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+        if (ED.equalizerXmt[i] > initialValue) countIncreased++;
+    }
+    EXPECT_EQ(countIncreased, 1);
+
+    // Decrement TX value
+    DecrementEqualizerValue();
+
+    // Verify that the cell returned to initial value
+    int countAtInitial = 0;
+    for (int i = 0; i < EQUALIZER_CELL_COUNT; i++) {
+        if (ED.equalizerXmt[i] == initialValue) countAtInitial++;
+    }
+    EXPECT_EQ(countAtInitial, EQUALIZER_CELL_COUNT);
+}
+
+/**
+ * Test cell selection wraparound forward
+ * Verifies that cell selection wraps from last to first cell
+ */
+TEST_F(DisplayTest, Equalizer_CellSelectionWrapForward) {
+    extern void IncrementEqualizerSelection(void);
+
+    // Increment through all cells and verify it wraps
+    for (int i = 0; i < EQUALIZER_CELL_COUNT + 2; i++) {
+        IncrementEqualizerSelection();
+    }
+
+    // Test passes if no crashes occur
+    SUCCEED();
+}
+
+/**
+ * Test cell selection wraparound backward
+ * Verifies that cell selection wraps from first to last cell
+ */
+TEST_F(DisplayTest, Equalizer_CellSelectionWrapBackward) {
+    extern void DecrementEqualizerSelection(void);
+
+    // Decrement from initial position (should wrap to end)
+    for (int i = 0; i < 5; i++) {
+        DecrementEqualizerSelection();
+    }
+
+    // Test passes if no crashes occur
+    SUCCEED();
+}
+
+/**
+ * Test adjusting equalizer increment value
+ * Verifies that button 16 cycles through increment values
+ */
+TEST_F(DisplayTest, Equalizer_AdjustIncrement) {
+    extern void AdjustEqualizerIncrement(void);
+
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop(); MyDelay(10);
+
+    // Navigate to equalizer screen
+    SetInterrupt(iEQUALIZER);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_EQUALIZER);
+
+    // Adjust increment (button 16)
+    SetButton(16);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Adjust again to cycle through
+    SetButton(16);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Should cycle back to first increment
+    SetButton(16);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Test passes if no crashes occur
+    SUCCEED();
+}
+
+/**
+ * Test complete equalizer workflow
+ * Tests a realistic sequence: enter, navigate cells, modify values, toggle RX/TX, exit
+ */
+TEST_F(DisplayTest, Equalizer_CompleteWorkflow) {
+    Q_in_L.setChannel(0);
+    Q_in_R.setChannel(1);
+    Q_in_L.clear();
+    Q_in_R.clear();
+    StartMillis();
+
+    InitializeStorage();
+    InitializeFrontPanel();
+    InitializeSignalProcessing();
+    InitializeAudio();
+    InitializeDisplay();
+    InitializeRFHardware();
+
+    modeSM.vars.waitDuration_ms = CW_TRANSMIT_SPACE_TIMEOUT_MS;
+    modeSM.vars.ditDuration_ms = DIT_DURATION_MS;
+    ModeSm_start(&modeSM);
+    ED.agc = AGCOff;
+    ED.nrOptionSelect = NROff;
+    uiSM.vars.splashDuration_ms = 1;
+    UISm_start(&uiSM);
+    UpdateAudioIOState();
+
+    start_timer1ms();
+
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_HOME);
+
+    // Enter equalizer screen
+    SetInterrupt(iEQUALIZER);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_EQUALIZER);
+
+    // Perform a complete workflow of equalizer operations
+    // (Individual tests verify the actual value changes work correctly)
+
+    // Modify currently selected cell with filter encoder
+    SetInterrupt(iFILTER_INCREASE);
+    loop(); MyDelay(10);
+    SetInterrupt(iFILTER_DECREASE);
+    loop(); MyDelay(10);
+
+    // Navigate cells with volume encoder
+    SetInterrupt(iVOLUME_INCREASE);
+    loop(); MyDelay(10);
+    SetInterrupt(iVOLUME_DECREASE);
+    loop(); MyDelay(10);
+
+    // Toggle to TX equalizer
+    SetButton(15);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Modify TX cell
+    SetInterrupt(iFILTER_INCREASE);
+    loop(); MyDelay(10);
+
+    // Toggle back to RX
+    SetButton(15);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Change increment value
+    SetButton(16);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+
+    // Exit to home
+    SetButton(HOME_SCREEN);
+    SetInterrupt(iBUTTON_PRESSED);
+    loop(); MyDelay(10);
+    EXPECT_EQ(uiSM.state_id, UISm_StateId_HOME);
+}

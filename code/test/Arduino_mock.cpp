@@ -1,0 +1,560 @@
+#include "Arduino.h"
+#include "Wire.h"
+#include <iostream>
+#include <string>
+#include <cstdarg>
+
+SerialClass Serial;
+SerialClass SerialUSB1;
+TwoWire Wire;
+TwoWire Wire1;
+TwoWire Wire2;
+Teensy3ClockClass Teensy3Clock;
+
+// Mock Teensy temperature monitor registers
+// Set bit 2 (0x4) to indicate temperature sensor is ready
+uint32_t mock_TEMPMON_TEMPSENSE0 = 0x4 | (0x300 << 8);  // Ready bit + dummy temperature value
+uint32_t mock_TEMPMON_TEMPSENSE1 = 0;
+uint32_t mock_HW_OCOTP_ANA1 = 0x19C01900;  // Dummy calibration data
+
+#define NUMPINS 41
+static bool pin_mode[NUMPINS];
+static bool pin_value[NUMPINS];
+
+void SerialClass::begin(uint32_t baud) {
+    // Mock - just ignore the baud rate
+    (void)baud;
+}
+
+void SerialClass::createFile(const char* filename) {
+    if (filename != nullptr) {
+        file = fopen(filename, "w");
+    }
+}
+
+void SerialClass::closeFile() {
+    if (file != nullptr) {
+        fclose(file);
+        file = nullptr;
+    }
+}
+
+void SerialClass::print(const char* s) {
+    if (file) {
+        fprintf(file, "%s", s);
+    } else {
+        std::cout << s;
+    }
+}
+
+void SerialClass::println(const char* s) {
+    if (file) {
+        fprintf(file, "%s\n", s);
+    } else {
+        std::cout << s << std::endl;
+    }
+}
+
+void SerialClass::print(int n) {
+    if (file) {
+        fprintf(file, "%d", n);
+    } else {
+        std::cout << n;
+    }
+}
+
+void SerialClass::println(int n) {
+    if (file) {
+        fprintf(file, "%d\n", n);
+    } else {
+        std::cout << n << std::endl;
+    }
+}
+
+void SerialClass::print(int64_t n) {
+    if (file) {
+        fprintf(file, "%lld", (long long)n);
+    } else {
+        std::cout << (long long)n;
+    }
+}
+
+void SerialClass::println(int64_t n) {
+    if (file) {
+        fprintf(file, "%lld\n", (long long)n);
+    } else {
+        std::cout << (long long)n << std::endl;
+    }
+}
+
+void SerialClass::print(uint32_t n) {
+    if (file) {
+        fprintf(file, "%u", n);
+    } else {
+        std::cout << n;
+    }
+}
+
+void SerialClass::println(uint32_t n) {
+    if (file) {
+        fprintf(file, "%u\n", n);
+    } else {
+        std::cout << n << std::endl;
+    }
+}
+
+void SerialClass::print(float f) {
+    if (file) {
+        fprintf(file, "%f", f);
+    } else {
+        std::cout << f;
+    }
+}
+
+void SerialClass::println(float f) {
+    if (file) {
+        fprintf(file, "%f\n", f);
+    } else {
+        std::cout << f << std::endl;
+    }
+}
+
+void SerialClass::println(const String& s) {
+    if (file) {
+        fprintf(file, "%s\n", s.c_str());
+    } else {
+        std::cout << s.c_str() << std::endl;
+    }
+}
+
+void SerialClass::print(size_t n) {
+    if (file) {
+        fprintf(file, "%zu", n);
+    } else {
+        std::cout << n;
+    }
+}
+
+void SerialClass::println(size_t n) {
+    if (file) {
+        fprintf(file, "%zu\n", n);
+    } else {
+        std::cout << n << std::endl;
+    }
+}
+
+void SerialClass::printf(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    if (file) {
+        vfprintf(file, format, args);
+    } else {
+        vprintf(format, args);
+    }
+    va_end(args);
+}
+
+uint32_t SerialClass::available(void) {
+    if (readIndex >= inputBuffer.size()) {
+        return 0;
+    }
+    return inputBuffer.size() - readIndex;
+}
+
+uint8_t SerialClass::read(void) {
+    if (readIndex >= inputBuffer.size()) {
+        return 0;
+    }
+    return inputBuffer[readIndex++];
+}
+
+uint32_t SerialClass::availableForWrite(void) {
+    return 64;  // Return a positive value to allow serial writing in tests
+}
+
+void SerialClass::flush(void) {}
+
+void SerialClass::feedData(const char* data) {
+    if (data != nullptr) {
+        while (*data) {
+            inputBuffer.push_back(static_cast<uint8_t>(*data));
+            data++;
+        }
+    }
+}
+
+void SerialClass::clearBuffer(void) {
+    inputBuffer.clear();
+    readIndex = 0;
+}
+
+void SerialClass::println() {
+    if (file) {
+        fprintf(file, "\n");
+    } else {
+        std::cout << std::endl;
+    }
+}
+
+// Time synchronization mock
+void setSyncProvider(getExternalTime getTimeFunction) {
+    // Mock - just ignore the time provider
+    (void)getTimeFunction;
+}
+
+// Note: initTempMon is defined in Globals.cpp, no mock needed
+
+int64_t tstart;
+int64_t tstartMicros;
+
+void cli(void){}
+void sei(void){}
+void delayMicroseconds(uint32_t usec){}
+
+void StartMillis(void){
+    struct timeval tv;
+    gettimeofday(&tv,NULL);
+    tstart = (int64_t)(1000 * tv.tv_sec) + (int64_t)((float32_t)tv.tv_usec/1000);
+    tstartMicros = (int64_t)(1000000 * tv.tv_sec) + (int64_t)tv.tv_usec;
+}
+
+void AddMillisTime(uint64_t delta_ms){
+    tstart -= delta_ms;
+    tstartMicros -= delta_ms * 1000;  // Also advance micros() for timing tests
+}
+
+int64_t millis(void){
+    struct timeval tv;
+    gettimeofday(&tv,NULL);
+    return (int64_t)(1000 * tv.tv_sec) + (int64_t)((float32_t)tv.tv_usec/1000) - tstart;
+}
+
+uint32_t micros(void){
+    struct timeval tv;
+    gettimeofday(&tv,NULL);
+    int64_t current_micros = (int64_t)(1000000 * tv.tv_sec) + (int64_t)tv.tv_usec;
+    return (uint32_t)(current_micros - tstartMicros);
+}
+
+void SetMillisTime(uint64_t time_ms){
+    tstart = millis()+tstart - time_ms;
+}
+
+void digitalWrite(uint16_t pin, uint8_t val){
+    //digital_write_pins.push_back(pin);
+    //digital_write_values.push_back(val);
+    if (pin < NUMPINS) pin_value[pin] = val;
+}
+uint8_t digitalRead(uint16_t pin){
+    if (pin < NUMPINS) return pin_value[pin];
+    return 0;
+}
+
+void pinMode(uint16_t pin, uint8_t val){
+    if (pin < NUMPINS) pin_mode[pin] = val;
+}
+
+uint8_t getPinMode(uint16_t pin){
+    if (pin < NUMPINS) return pin_mode[pin];
+    return 0;
+}
+
+// Interrupt function mocks
+// For testing purposes, we just store the interrupt settings but don't actually
+// call the callbacks. Tests can call the interrupt handlers directly if needed.
+#define MAX_INTERRUPTS 16
+struct InterruptInfo {
+    uint8_t pin;
+    voidFuncPtr callback;
+    int mode;
+    bool active;
+};
+static InterruptInfo interrupts[MAX_INTERRUPTS] = {{0, nullptr, 0, false}};
+
+void attachInterrupt(uint8_t interrupt, voidFuncPtr callback, int mode) {
+    if (interrupt < MAX_INTERRUPTS) {
+        interrupts[interrupt].pin = interrupt;
+        interrupts[interrupt].callback = callback;
+        interrupts[interrupt].mode = mode;
+        interrupts[interrupt].active = true;
+    }
+}
+
+void detachInterrupt(uint8_t interrupt) {
+    if (interrupt < MAX_INTERRUPTS) {
+        interrupts[interrupt].active = false;
+        interrupts[interrupt].callback = nullptr;
+    }
+}
+
+uint8_t digitalPinToInterrupt(uint8_t pin) {
+    // In the mock, we just return the pin number itself as the interrupt number
+    // In real hardware, there's a mapping, but for testing this is sufficient
+    return pin;
+}
+
+void __disable_irq(void) {
+    // Mock implementation - does nothing in test environment
+}
+
+void __enable_irq(void) {
+    // Mock implementation - does nothing in test environment
+}
+
+long map(long value, long fromLow, long fromHigh, long toLow, long toHigh) {
+    // Arduino map function implementation
+    // Maps a value from one range to another
+    // Guard against division by zero
+    if (fromHigh == fromLow) {
+        return toLow;
+    }
+    return (value - fromLow) * (toHigh - toLow) / (fromHigh - fromLow) + toLow;
+}
+
+
+#include <cstring>
+// A mock C++ class that mimics the Arduino String class
+String::String() : _data(new char[1]) {
+    _data[0] = '\0';
+}
+
+// Constructor from C-style string
+String::String(const char* c_str) {
+    if (c_str) {
+        _data = new char[strlen(c_str) + 1];
+        strcpy(_data, c_str);
+    } else {
+        _data = new char[1];
+        _data[0] = '\0';
+    }
+}
+
+String::String(int val) {
+    char buf[12];
+    sprintf(buf, "%d", val);
+    _data = new char[strlen(buf) + 1];
+    strcpy(_data, buf);
+}
+
+String::String(int val, int base) {
+    char buf[34]; // Large enough for binary representation
+    if (base == 16) {
+        sprintf(buf, "%X", val);
+    } else if (base == 2) {
+        // Convert to binary
+        if (val == 0) {
+            strcpy(buf, "0");
+        } else {
+            int index = 0;
+            char temp[34];
+            while (val > 0) {
+                temp[index++] = (val % 2) + '0';
+                val /= 2;
+            }
+            // Reverse the string
+            for (int i = 0; i < index; i++) {
+                buf[i] = temp[index - 1 - i];
+            }
+            buf[index] = '\0';
+        }
+    } else {
+        sprintf(buf, "%d", val); // Default to decimal
+    }
+    _data = new char[strlen(buf) + 1];
+    strcpy(_data, buf);
+}
+
+String::String(unsigned int val) {
+    char buf[12];
+    sprintf(buf, "%u", val);
+    _data = new char[strlen(buf) + 1];
+    strcpy(_data, buf);
+}
+
+String::String(unsigned int val, int base) {
+    char buf[34]; // Large enough for binary representation
+    if (base == 16) {
+        sprintf(buf, "%X", val);
+    } else if (base == 2) {
+        // Convert to binary
+        if (val == 0) {
+            strcpy(buf, "0");
+        } else {
+            int index = 0;
+            char temp[34];
+            while (val > 0) {
+                temp[index++] = (val % 2) + '0';
+                val /= 2;
+            }
+            // Reverse the string
+            for (int i = 0; i < index; i++) {
+                buf[i] = temp[index - 1 - i];
+            }
+            buf[index] = '\0';
+        }
+    } else {
+        sprintf(buf, "%u", val); // Default to decimal
+    }
+    _data = new char[strlen(buf) + 1];
+    strcpy(_data, buf);
+}
+
+String::String(long val) {
+    char buf[22];
+    sprintf(buf, "%ld", val);
+    _data = new char[strlen(buf) + 1];
+    strcpy(_data, buf);
+}
+
+String::String(long val, int base) {
+    char buf[66]; // Large enough for binary representation of long
+    if (base == 16) {
+        sprintf(buf, "%lX", val);
+    } else if (base == 2) {
+        // Convert to binary
+        if (val == 0) {
+            strcpy(buf, "0");
+        } else {
+            int index = 0;
+            char temp[66];
+            while (val > 0) {
+                temp[index++] = (val % 2) + '0';
+                val /= 2;
+            }
+            // Reverse the string
+            for (int i = 0; i < index; i++) {
+                buf[i] = temp[index - 1 - i];
+            }
+            buf[index] = '\0';
+        }
+    } else {
+        sprintf(buf, "%ld", val); // Default to decimal
+    }
+    _data = new char[strlen(buf) + 1];
+    strcpy(_data, buf);
+}
+
+String::String(float val) {
+    char buf[32];
+    sprintf(buf, "%f", val);
+    _data = new char[strlen(buf) + 1];
+    strcpy(_data, buf);
+}
+
+
+// Copy constructor
+String::String(const String& other) {
+    _data = new char[other.length() + 1];
+    strcpy(_data, other._data);
+}
+
+// Destructor to free dynamically allocated memory
+String::~String() {
+    delete[] _data;
+}
+
+// Get the length of the string
+size_t String::length() const {
+    return strlen(_data);
+}
+
+// Get the C-style string pointer
+const char* String::c_str() const {
+    return _data;
+}
+
+// Overloaded assignment operator
+String& String::operator=(const String& other) {
+    if (this != &other) {
+        delete[] _data;
+        _data = new char[other.length() + 1];
+        strcpy(_data, other._data);
+    }
+    return *this;
+}
+
+// Overloaded concatenation operator
+String String::operator+(const String& other) const {
+    char* new_data = new char[length() + other.length() + 1];
+    strcpy(new_data, _data);
+    strcat(new_data, other._data);
+    String result(new_data);
+    delete[] new_data;
+    return result;
+}
+
+String String::operator+(const char* other) const{
+    char* new_data = new char[length() + strlen(other) + 1];
+    strcpy(new_data, _data);
+    strcat(new_data, other);
+    String result(new_data);
+    delete[] new_data;
+    return result;
+}
+
+// Free function to allow const char* + String
+String operator+(const char* left, const String& right) {
+    char* new_data = new char[strlen(left) + right.length() + 1];
+    strcpy(new_data, left);
+    strcat(new_data, right.c_str());
+    String result(new_data);
+    delete[] new_data;
+    return result;
+}
+
+// Overloaded += operators
+String& String::operator+=(const String& other) {
+    char* new_data = new char[length() + other.length() + 1];
+    strcpy(new_data, _data);
+    strcat(new_data, other._data);
+    delete[] _data;
+    _data = new_data;
+    return *this;
+}
+
+String& String::operator+=(const char* other) {
+    char* new_data = new char[length() + strlen(other) + 1];
+    strcpy(new_data, _data);
+    strcat(new_data, other);
+    delete[] _data;
+    _data = new_data;
+    return *this;
+}
+
+// Substring function
+String String::substring(unsigned int from, unsigned int to) const {
+    size_t len = length();
+    if (from >= len) return String("");
+    if (to > len) to = len;
+    if (from >= to) return String("");
+
+    char* sub_data = new char[to - from + 1];
+    strncpy(sub_data, _data + from, to - from);
+    sub_data[to - from] = '\0';
+    String result(sub_data);
+    delete[] sub_data;
+    return result;
+}
+
+// Convert String to char array
+void String::toCharArray(char* buffer, unsigned int bufferSize) const {
+    if (buffer == nullptr || bufferSize == 0) {
+        return;
+    }
+
+    size_t len = length();
+    size_t copyLen = (len < bufferSize - 1) ? len : (bufferSize - 1);
+
+    strncpy(buffer, _data, copyLen);
+    buffer[copyLen] = '\0';
+}
+
+// Convert String to integer
+int String::toInt() const {
+    if (_data == nullptr) {
+        return 0;
+    }
+    return atoi(_data);
+}
+
+void flush(void){}
